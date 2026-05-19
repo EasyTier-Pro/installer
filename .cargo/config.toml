@@ -1,0 +1,23 @@
+[target.mips-unknown-linux-musl]
+linker = "mips-unknown-linux-muslsf-gcc"
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-L", "./musl_gcc/mips-unknown-linux-muslsf/mips-unknown-linux-muslsf/lib",
+    "-L", "./musl_gcc/mips-unknown-linux-muslsf/mips-unknown-linux-muslsf/sysroot/usr/lib",
+    "-L", "./musl_gcc/mips-unknown-linux-muslsf/lib/gcc/mips-unknown-linux-muslsf/15.1.0",
+    "-l", "atomic",
+    "-l", "ctz",
+    "-l", "gcc",
+]
+
+[target.mipsel-unknown-linux-musl]
+linker = "mipsel-unknown-linux-muslsf-gcc"
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-L", "./musl_gcc/mipsel-unknown-linux-muslsf/mipsel-unknown-linux-muslsf/lib",
+    "-L", "./musl_gcc/mipsel-unknown-linux-muslsf/mipsel-unknown-linux-muslsf/sysroot/usr/lib",
+    "-L", "./musl_gcc/mipsel-unknown-linux-muslsf/lib/gcc/mipsel-unknown-linux-muslsf/15.1.0",
+    "-l", "atomic",
+    "-l", "ctz",
+    "-l", "gcc",
+]

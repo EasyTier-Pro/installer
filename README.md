@@ -2,17 +2,36 @@
 
 跨平台一键部署工具。运行后自动引导完成登录、获取注册密钥、下载 EasyTier、安装系统服务的全部流程。
 
+## 快速安装
+
+### Linux / macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/EasyTier-Pro/installer/main/install.sh | bash
+```
+
+指定安装目录（将 installer 下载到该目录后执行）：
+```bash
+curl -fsSL https://raw.githubusercontent.com/EasyTier-Pro/installer/main/install.sh | INSTALL_DIR=/usr/local/bin bash
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/EasyTier-Pro/installer/main/install.ps1 | iex
+```
+
 ## 用法
 
 ```bash
 # 直接运行，按提示操作即可
-./easytier-agent
+./easytier-pro-installer
 ```
 
 典型流程：
 
 ```
-$ ./easytier-agent
+$ ./easytier-pro-installer
 您尚未登录 Console，正在引导登录...
 
 正在获取登录验证码...
@@ -35,7 +54,7 @@ $ ./easytier-agent
 
 平台: linux-x86_64
 
-安装目录: /home/user/.local/share/easytier-agent/easytier
+安装目录: /home/user/.local/share/easytier-pro-installer/easytier
 
 正在查询最新版本...
 最新版本: v2.6.4
@@ -58,10 +77,10 @@ EasyTier 已就绪: ...
 
 ```bash
 # 查看服务状态
-./easytier-agent --status
+./easytier-pro-installer --status
 
 # 卸载服务
-./easytier-agent --uninstall
+./easytier-pro-installer --uninstall
 ```
 
 ## 可选参数

@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux (static musl)
+          - { target: x86_64-unknown-linux-musl,       os: linux,   arch: x86_64,     runner: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl,      os: linux,   arch: aarch64,    runner: ubuntu-latest }
+          - { target: riscv64gc-unknown-linux-musl,    os: linux,   arch: riscv64,    runner: ubuntu-latest }
+          - { target: loongarch64-unknown-linux-musl,  os: linux,   arch: loongarch64,runner: ubuntu-latest }
+          - { target: armv7-unknown-linux-musleabihf,  os: linux,   arch: armv7hf,    runner: ubuntu-latest }
+          - { target: armv7-unknown-linux-musleabi,    os: linux,   arch: armv7,      runner: ubuntu-latest }
+          - { target: arm-unknown-linux-musleabihf,    os: linux,   arch: armhf,      runner: ubuntu-latest }
+          - { target: arm-unknown-linux-musleabi,      os: linux,   arch: arm,        runner: ubuntu-latest }
+          - { target: mips-unknown-linux-musl,         os: linux,   arch: mips,       runner: ubuntu-latest }
+          - { target: mipsel-unknown-linux-musl,       os: linux,   arch: mipsel,     runner: ubuntu-latest }
+
+          # macOS
+          - { target: x86_64-apple-darwin,             os: macos,   arch: x86_64,     runner: macos-latest }
+          - { target: aarch64-apple-darwin,            os: macos,   arch: aarch64,    runner: macos-latest }
+
+          # Windows
+          - { target: x86_64-pc-windows-msvc,          os: windows, arch: x86_64,     runner: windows-latest }
+          - { target: i686-pc-windows-msvc,            os: windows, arch: i686,       runner: windows-latest }
+          - { target: aarch64-pc-windows-msvc,         os: windows, arch: arm64,      runner: windows-11-arm }
+
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ !contains(matrix.target, 'mips') && matrix.target || '' }}
+          components: ${{ contains(matrix.target, 'mips') && 'rust-src' || '' }}
+
+      - name: Install zig
+        if: matrix.os == 'linux' && !contains(matrix.target, 'mips')
+        uses: goto-bus-stop/setup-zig@v2
+
+      - name: Install cargo-zigbuild
+        if: matrix.os == 'linux' && !contains(matrix.target, 'mips')
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Install musl-cross (MIPS)
+        if: contains(matrix.target, 'mips')
+        run: |
+          MUSL_TARGET="${{ matrix.target }}sf"
+          mkdir -p ./musl_gcc
+          wget -q "https://github.com/cross-tools/musl-cross/releases/download/20250520/${MUSL_TARGET}.tar.xz" -P ./musl_gcc/
+          tar -xf "./musl_gcc/${MUSL_TARGET}.tar.xz" -C ./musl_gcc/
+          chmod -R a+rwx ./musl_gcc
+          cd "./musl_gcc/${MUSL_TARGET}/lib/gcc/${MUSL_TARGET}/15.1.0"
+          cp libgcc_eh.a libunwind.a
+          ar x libgcc.a _ctzsi2.o _clz.o _bswapsi2.o
+          ar rcs libctz.a _ctzsi2.o _clz.o _bswapsi2.o
+          echo "$PWD/../../../../bin" >> "$GITHUB_PATH"
+
+      - name: Build (Linux, non-MIPS)
+        if: matrix.os == 'linux' && !contains(matrix.target, 'mips')
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+
+      - name: Build (MIPS)
+        if: contains(matrix.target, 'mips')
+        env:
+          RUSTC_BOOTSTRAP: "1"
+        run: cargo build -Z build-std=std,panic_abort --release --target ${{ matrix.target }}
+
+      - name: Build (macOS / Windows)
+        if: matrix.os != 'linux'
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare binary
+        shell: bash
+        run: |
+          src="target/${{ matrix.target }}/release/easytier-pro-installer"
+          dst="easytier-pro-installer-${{ matrix.os }}-${{ matrix.arch }}"
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            cp "${src}.exe" "${dst}.exe"
+          else
+            cp "$src" "$dst"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: easytier-pro-installer-${{ matrix.os }}-${{ matrix.arch }}
+          path: easytier-pro-installer-${{ matrix.os }}-${{ matrix.arch }}*
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

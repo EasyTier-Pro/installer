@@ -1,0 +1,234 @@
+mod check;
+mod download;
+mod key_select;
+pub(crate) mod platform;
+pub(crate) mod service;
+
+pub(crate) use check::{check_existing_install, ExistingAction};
+pub(crate) use platform::default_install_dir;
+pub(crate) use service::{run_status, run_uninstall};
+
+use crate::api::client::ConsoleClient;
+use crate::config::Config;
+use colored::Colorize;
+use std::path::{Path, PathBuf};
+
+pub(crate) fn core_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "easytier-core.exe"
+    } else {
+        "easytier-core"
+    }
+}
+
+pub(crate) fn cli_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "easytier-cli.exe"
+    } else {
+        "easytier-cli"
+    }
+}
+
+/// 检测 install_dir 是否可写。不可写时立即返回友好的错误，避免用户走完登录流程才发现。
+pub(crate) fn check_install_dir_writable(install_dir: &Path) -> anyhow::Result<()> {
+    if let Err(e) = std::fs::create_dir_all(install_dir) {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            anyhow::bail!(
+                "无法创建安装目录 {}：权限不足。请使用 sudo 或管理员身份运行本程序",
+                install_dir.display()
+            );
+        }
+        return Err(e.into());
+    }
+    let test_file = install_dir.join(".write_test");
+    if let Err(e) = std::fs::File::create(&test_file) {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            anyhow::bail!(
+                "无法写入安装目录 {}：权限不足。请使用 sudo 或管理员身份运行本程序",
+                install_dir.display()
+            );
+        }
+        return Err(e.into());
+    }
+    let _ = std::fs::remove_file(&test_file);
+    Ok(())
+}
+
+pub(crate) async fn run_deploy(
+    config: &Config,
+    client: &ConsoleClient,
+    install_dir: Option<PathBuf>,
+    config_server_base: Option<String>,
+    version_override: Option<String>,
+) -> anyhow::Result<()> {
+    let install_dir = install_dir.unwrap_or_else(default_install_dir);
+    std::fs::create_dir_all(&install_dir)?;
+
+    // 1. 获取用户信息
+    let me = client.get_me().await?;
+    if me.tenants.is_empty() {
+        anyhow::bail!("您不属于任何工作空间，无法部署设备");
+    }
+
+    let tenant = if me.tenants.len() == 1 {
+        let t = me.tenants.into_iter().next().unwrap();
+        crate::style::ok_kv("工作空间:", &t.name);
+        t
+    } else {
+        let tenant_names: Vec<String> = me.tenants.iter().map(|t| t.name.clone()).collect();
+        let idx = key_select::read_choice(&tenant_names, "请选择要部署到的工作空间")? - 1;
+        let t = me.tenants.into_iter().nth(idx).unwrap();
+        crate::style::ok_kv("工作空间:", &t.name);
+        t
+    };
+
+    // 尝试从 Console 获取推荐的版本和 config server URL
+    let mut console_version = None;
+    let mut console_config_server = None;
+    if let Ok(gs) = client.get_started(&tenant.id).await {
+        if !gs.config_server_url.is_empty() {
+            console_config_server = Some(gs.config_server_url);
+        }
+        if !gs.release_channels.stable.version.is_empty() {
+            console_version = Some(gs.release_channels.stable.version.clone());
+        }
+    }
+
+    // 2. 获取 enrollment key
+    let keys = client.list_device_enrollment_keys(&tenant.id).await?;
+    let active_keys: Vec<_> = keys
+        .into_iter()
+        .filter(|k| !k.revoked && k.lifecycle_state != "expired")
+        .collect();
+
+    let bootstrap_token = if active_keys.is_empty() {
+        if !key_select::confirm_yes("当前没有可用密钥，是否创建一个用于本次部署")? {
+            anyhow::bail!("没有可用的注册密钥，部署已取消。您可以前往 Console 手动创建。");
+        }
+        let (key, token) = key_select::create_new_key(client, &tenant.id).await?;
+        let label = key_select::key_type_label(key.reusable);
+        crate::style::ok_kv("注册密钥:", &format!("{} [{}]", key_select::key_name(&key), label));
+        token
+    } else if active_keys.len() == 1 {
+        let key = active_keys.into_iter().next().unwrap();
+        let name = key_select::key_name(&key).to_string();
+        let label = key_select::key_type_label(key.reusable);
+        if key_select::confirm_yes(&format!("是否使用{}密钥 {} 进行部署", label, name))? {
+            let token = key_select::get_key_token(client, &tenant.id, &key).await?;
+            crate::style::ok_kv("注册密钥:", &format!("{} [{}]", name, label));
+            token
+        } else {
+            let (key, token) = key_select::create_new_key(client, &tenant.id).await?;
+            let new_label = key_select::key_type_label(key.reusable);
+            crate::style::ok_kv("注册密钥:", &format!("{} [{}]", key_select::key_name(&key), new_label));
+            token
+        }
+    } else {
+        let multi_keys: Vec<_> = active_keys.iter().filter(|k| k.reusable).cloned().collect();
+        let single_keys: Vec<_> = active_keys.iter().filter(|k| !k.reusable).cloned().collect();
+        let (token, key) =
+            key_select::select_key(client, &tenant.id, &multi_keys, &single_keys).await?;
+        let label = key_select::key_type_label(key.reusable);
+        crate::style::ok_kv("注册密钥:", &format!("{} [{}]", key_select::key_name(&key), label));
+        token
+    };
+
+    // 3. 构造 config server URL
+    let config_server = platform::build_config_server_url(
+        &config.console_base_url,
+        config_server_base.or(console_config_server),
+    )?;
+    let full_config_url = format!(
+        "{}/{}",
+        config_server.trim_end_matches('/'),
+        bootstrap_token
+    );
+    crate::style::kv("配置服务器:", &full_config_url);
+    println!();
+
+    // 4. 检测平台并下载 easytier
+    let platform = platform::detect_platform()?;
+
+    let download_version = version_override.or(console_version);
+    let version_label = download_version.clone().unwrap_or_else(|| "latest".to_string());
+    crate::style::info(&format!(
+        "正在下载 easytier {} ({}-{})...",
+        version_label.bright_white(),
+        platform.os,
+        platform.arch
+    ));
+    crate::style::kv("下载目录:", &install_dir.to_string_lossy());
+
+    let (core_path, cli_path, _installed_version) =
+        download::download_easytier(&platform, &install_dir, download_version).await?;
+    crate::style::success("下载完成");
+
+    println!();
+    crate::style::info("正在安装并启动服务...");
+    service::install_service(&cli_path, &core_path, &full_config_url).await?;
+
+    println!();
+    crate::style::success(&format!("{} 部署完成，正在运行。", "EasyTier".bright_white()));
+    Ok(())
+}
+
+pub(crate) async fn run_upgrade(
+    install_dir: &Path,
+    version_override: Option<String>,
+) -> anyhow::Result<()> {
+    let platform = platform::detect_platform()?;
+    let target_version = if let Some(ref v) = version_override {
+        download::normalize_version(v)
+    } else {
+        download::fetch_latest_version().await?
+    };
+
+    let core_path = install_dir.join(core_binary_name());
+    let current_version =
+        service::get_core_version(&core_path).unwrap_or_else(|| "未知".to_string());
+
+    if current_version == target_version {
+        crate::style::info(&format!("当前已是最新版本 {}", target_version.bright_white()));
+        return Ok(());
+    }
+
+    crate::style::info(&format!(
+        "正在从 {} 升级至 {}...",
+        current_version.bright_white(),
+        target_version.bright_white()
+    ));
+
+    let (_, cli_path, _) =
+        download::download_easytier(&platform, install_dir, Some(target_version.clone())).await?;
+    crate::style::success(&format!("已下载 {}", target_version));
+
+    println!();
+    crate::style::info("正在重启服务...");
+    let _ = tokio::process::Command::new(&cli_path)
+        .args(["service", "--name", service::SERVICE_NAME, "stop"])
+        .output()
+        .await;
+
+    let start = tokio::process::Command::new(&cli_path)
+        .args(["service", "--name", service::SERVICE_NAME, "start"])
+        .output()
+        .await?;
+
+    if start.status.success() {
+        crate::style::success("服务已重启");
+    } else {
+        let stderr = String::from_utf8_lossy(&start.stderr);
+        if !stderr.is_empty() {
+            println!("  {}", stderr.trim());
+        }
+        crate::style::warning("启动失败，请尝试重新部署");
+    }
+
+    println!();
+    crate::style::success(&format!(
+        "{} 已升级至 {}，正在运行。",
+        "EasyTier".bright_white(),
+        target_version.bright_white()
+    ));
+    Ok(())
+}

@@ -132,34 +132,23 @@ impl ConsoleClient {
         }
     }
 
+    fn load_valid_token(&self) -> anyhow::Result<String> {
+        let token = self
+            .token_store
+            .load()?
+            .ok_or_else(|| anyhow::anyhow!("未登录，请先执行 easytier-pro-installer login"))?;
+        if token.is_expired() {
+            anyhow::bail!("登录已过期，请重新执行 easytier-pro-installer login")
+        }
+        Ok(token.access_token)
+    }
+
     pub async fn request<T: DeserializeOwned>(
         &self,
         method: Method,
         path: &str,
     ) -> anyhow::Result<T> {
-        let token = self
-            .token_store
-            .load()?
-            .ok_or_else(|| anyhow::anyhow!("未登录，请先执行 easytier-agent login"))?;
-
-        if token.is_expired() {
-            anyhow::bail!("登录已过期，请重新执行 easytier-agent login")
-        }
-
-        let resp = self
-            .client
-            .request(method, format!("{}{}", self.base_url, path))
-            .bearer_auth(&token.access_token)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("请求失败: {}", text)
-        }
-
-        let body = resp.json().await?;
-        Ok(body)
+        self.send(method, path, |req| req).await
     }
 
     pub async fn request_with_body<T: DeserializeOwned, B: serde::Serialize>(
@@ -168,30 +157,30 @@ impl ConsoleClient {
         path: &str,
         body: &B,
     ) -> anyhow::Result<T> {
-        let token = self
-            .token_store
-            .load()?
-            .ok_or_else(|| anyhow::anyhow!("未登录，请先执行 easytier-agent login"))?;
+        self.send(method, path, |req| req.json(body)).await
+    }
 
-        if token.is_expired() {
-            anyhow::bail!("登录已过期，请重新执行 easytier-agent login")
-        }
-
-        let resp = self
-            .client
-            .request(method, format!("{}{}", self.base_url, path))
-            .bearer_auth(&token.access_token)
-            .json(body)
-            .send()
-            .await?;
+    async fn send<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        configure: impl FnOnce(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+    ) -> anyhow::Result<T> {
+        let access_token = self.load_valid_token()?;
+        let resp = configure(
+            self.client
+                .request(method, format!("{}{}", self.base_url, path))
+                .bearer_auth(&access_token),
+        )
+        .send()
+        .await?;
 
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
             anyhow::bail!("请求失败: {}", text)
         }
 
-        let body = resp.json().await?;
-        Ok(body)
+        Ok(resp.json().await?)
     }
 
     pub async fn get_me(&self) -> anyhow::Result<MeResponse> {

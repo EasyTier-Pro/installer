@@ -3,10 +3,11 @@ use colored::Colorize;
 /// 自定义 dialoguer 主题：●/○ 圆点指示器
 pub fn dialoguer_theme() -> dialoguer::theme::ColorfulTheme {
     use console::style;
-    let mut t = dialoguer::theme::ColorfulTheme::default();
-    t.active_item_prefix = style("● ".to_string()).green();
-    t.inactive_item_prefix = style("○ ".to_string()).dim();
-    t
+    dialoguer::theme::ColorfulTheme {
+        active_item_prefix: style("● ".to_string()).green(),
+        inactive_item_prefix: style("○ ".to_string()).dim(),
+        ..Default::default()
+    }
 }
 
 /// 成功状态 ✓ 绿色

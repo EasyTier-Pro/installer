@@ -1,11 +1,4 @@
 use super::{DeviceAuthInfo, DeviceAuthResponse, OAuthError, TokenExchangeResponse, TokenSet};
-
-fn strip_cancel_token(url: &str) -> String {
-    match url.split_once("?cancelToken=") {
-        Some((base, _)) => base.to_string(),
-        None => url.to_string(),
-    }
-}
 use reqwest::Client;
 use std::time::Duration;
 use tokio::time::{Instant, interval, sleep};
@@ -118,5 +111,12 @@ impl DeviceFlow {
                 _ => anyhow::bail!("登录失败: {}", err.description.unwrap_or(err.error)),
             }
         }
+    }
+}
+
+fn strip_cancel_token(url: &str) -> String {
+    match url.split_once("?cancelToken=") {
+        Some((base, _)) => base.to_string(),
+        None => url.to_string(),
     }
 }
