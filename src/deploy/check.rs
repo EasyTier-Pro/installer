@@ -31,9 +31,11 @@ pub(crate) async fn check_existing_install(
     }
 
     let core_path = install_dir.join(super::core_binary_name());
-    let version =
-        get_core_version(&core_path).unwrap_or_else(|| "未知版本".to_string());
-    crate::style::info(&format!("检测到 EasyTier {} 已安装", version.bright_white()));
+    let version = get_core_version(&core_path).unwrap_or_else(|| "未知版本".to_string());
+    crate::style::info(&format!(
+        "检测到 EasyTier {} 已安装",
+        version.bright_white()
+    ));
     println!();
 
     let items = vec!["取消", "卸载", "更新软件", "重新部署"];
@@ -97,9 +99,7 @@ async fn do_uninstall(cli_path: &Path) -> anyhow::Result<()> {
             crate::style::success("EasyTier 服务已卸载");
         } else {
             crate::style::warning("卸载未生效，服务仍然存在");
-            return Err(anyhow::anyhow!(
-                "卸载未生效，请手动检查 easytier 进程"
-            ));
+            return Err(anyhow::anyhow!("卸载未生效，请手动检查 easytier 进程"));
         }
     } else {
         crate::style::success("EasyTier 服务已卸载");

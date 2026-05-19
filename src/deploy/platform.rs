@@ -89,10 +89,7 @@ pub(crate) fn relaunch_elevated() -> anyhow::Result<std::process::ExitStatus> {
             .stderr(std::process::Stdio::inherit());
 
         let status = cmd.status().map_err(|e| {
-            anyhow::anyhow!(
-                "无法调用 sudo ({})，请手动使用 sudo 重新运行本程序",
-                e
-            )
+            anyhow::anyhow!("无法调用 sudo ({})，请手动使用 sudo 重新运行本程序", e)
         })?;
 
         Ok(status)

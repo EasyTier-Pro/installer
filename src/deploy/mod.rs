@@ -4,7 +4,7 @@ mod key_select;
 pub(crate) mod platform;
 pub(crate) mod service;
 
-pub(crate) use check::{check_existing_install, ExistingAction};
+pub(crate) use check::{ExistingAction, check_existing_install};
 pub(crate) use platform::default_install_dir;
 pub(crate) use service::{run_status, run_uninstall};
 
@@ -102,12 +102,16 @@ pub(crate) async fn run_deploy(
         .collect();
 
     let bootstrap_token = if active_keys.is_empty() {
-        if !key_select::confirm_yes("当前没有可用密钥，是否创建一个用于本次部署")? {
+        if !key_select::confirm_yes("当前没有可用密钥，是否创建一个用于本次部署")?
+        {
             anyhow::bail!("没有可用的注册密钥，部署已取消。您可以前往 Console 手动创建。");
         }
         let (key, token) = key_select::create_new_key(client, &tenant.id).await?;
         let label = key_select::key_type_label(key.reusable);
-        crate::style::ok_kv("注册密钥:", &format!("{} [{}]", key_select::key_name(&key), label));
+        crate::style::ok_kv(
+            "注册密钥:",
+            &format!("{} [{}]", key_select::key_name(&key), label),
+        );
         token
     } else if active_keys.len() == 1 {
         let key = active_keys.into_iter().next().unwrap();
@@ -120,16 +124,26 @@ pub(crate) async fn run_deploy(
         } else {
             let (key, token) = key_select::create_new_key(client, &tenant.id).await?;
             let new_label = key_select::key_type_label(key.reusable);
-            crate::style::ok_kv("注册密钥:", &format!("{} [{}]", key_select::key_name(&key), new_label));
+            crate::style::ok_kv(
+                "注册密钥:",
+                &format!("{} [{}]", key_select::key_name(&key), new_label),
+            );
             token
         }
     } else {
         let multi_keys: Vec<_> = active_keys.iter().filter(|k| k.reusable).cloned().collect();
-        let single_keys: Vec<_> = active_keys.iter().filter(|k| !k.reusable).cloned().collect();
+        let single_keys: Vec<_> = active_keys
+            .iter()
+            .filter(|k| !k.reusable)
+            .cloned()
+            .collect();
         let (token, key) =
             key_select::select_key(client, &tenant.id, &multi_keys, &single_keys).await?;
         let label = key_select::key_type_label(key.reusable);
-        crate::style::ok_kv("注册密钥:", &format!("{} [{}]", key_select::key_name(&key), label));
+        crate::style::ok_kv(
+            "注册密钥:",
+            &format!("{} [{}]", key_select::key_name(&key), label),
+        );
         token
     };
 
@@ -150,7 +164,9 @@ pub(crate) async fn run_deploy(
     let platform = platform::detect_platform()?;
 
     let download_version = version_override.or(console_version);
-    let version_label = download_version.clone().unwrap_or_else(|| "latest".to_string());
+    let version_label = download_version
+        .clone()
+        .unwrap_or_else(|| "latest".to_string());
     crate::style::info(&format!(
         "正在下载 easytier {} ({}-{})...",
         version_label.bright_white(),
@@ -168,7 +184,10 @@ pub(crate) async fn run_deploy(
     service::install_service(&cli_path, &core_path, &full_config_url).await?;
 
     println!();
-    crate::style::success(&format!("{} 部署完成，正在运行。", "EasyTier".bright_white()));
+    crate::style::success(&format!(
+        "{} 部署完成，正在运行。",
+        "EasyTier".bright_white()
+    ));
     Ok(())
 }
 
@@ -188,7 +207,10 @@ pub(crate) async fn run_upgrade(
         service::get_core_version(&core_path).unwrap_or_else(|| "未知".to_string());
 
     if current_version == target_version {
-        crate::style::info(&format!("当前已是最新版本 {}", target_version.bright_white()));
+        crate::style::info(&format!(
+            "当前已是最新版本 {}",
+            target_version.bright_white()
+        ));
         return Ok(());
     }
 

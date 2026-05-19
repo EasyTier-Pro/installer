@@ -40,7 +40,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     }
 
     if cli.uninstall {
-        let install_dir = cli.install_dir.clone().unwrap_or_else(deploy::default_install_dir);
+        let install_dir = cli
+            .install_dir
+            .clone()
+            .unwrap_or_else(deploy::default_install_dir);
         if let Err(e) = deploy::check_install_dir_writable(&install_dir) {
             if !deploy::platform::is_elevated() {
                 crate::style::warning("需要管理员权限，正在尝试自动提权...");
@@ -52,7 +55,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         return deploy::run_uninstall(Some(install_dir)).await;
     }
 
-    let install_dir = cli.install_dir.clone().unwrap_or_else(deploy::default_install_dir);
+    let install_dir = cli
+        .install_dir
+        .clone()
+        .unwrap_or_else(deploy::default_install_dir);
     if let Err(e) = deploy::check_install_dir_writable(&install_dir) {
         if !deploy::platform::is_elevated() {
             crate::style::warning("需要管理员权限，正在尝试自动提权...");
@@ -90,5 +96,12 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         }
     }
 
-    deploy::run_deploy(&config, &client, cli.install_dir, cli.config_server, cli.version).await
+    deploy::run_deploy(
+        &config,
+        &client,
+        cli.install_dir,
+        cli.config_server,
+        cli.version,
+    )
+    .await
 }

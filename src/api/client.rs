@@ -227,7 +227,10 @@ impl ConsoleClient {
     }
 
     pub async fn get_started(&self, tenant_id: &str) -> anyhow::Result<GetStartedResponse> {
-        self.request(Method::GET, &format!("/api/v1/tenants/{}/get-started", tenant_id))
-            .await
+        self.request(
+            Method::GET,
+            &format!("/api/v1/tenants/{}/get-started", tenant_id),
+        )
+        .await
     }
 }

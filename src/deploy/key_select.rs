@@ -1,17 +1,11 @@
-use crate::api::client::{
-    ConsoleClient, CreateDeviceEnrollmentKeyRequest, DeviceEnrollmentKey,
-};
+use crate::api::client::{ConsoleClient, CreateDeviceEnrollmentKeyRequest, DeviceEnrollmentKey};
 
 pub(crate) fn key_name(key: &DeviceEnrollmentKey) -> &str {
     key.display_name.as_deref().unwrap_or(&key.key_code)
 }
 
 pub(crate) fn key_type_label(reusable: bool) -> &'static str {
-    if reusable {
-        "多设备"
-    } else {
-        "单设备"
-    }
+    if reusable { "多设备" } else { "单设备" }
 }
 
 pub(crate) fn confirm_yes(prompt: &str) -> anyhow::Result<bool> {
