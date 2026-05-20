@@ -156,8 +156,12 @@ pub(crate) async fn install_service(
         crate::style::success("服务已安装并启动");
     } else {
         let stderr = String::from_utf8_lossy(&start.stderr);
-        println!("  {}", stderr.trim());
-        crate::style::warning("服务已安装但启动失败，您可以稍后手动启动");
+        if stderr.contains("already running") {
+            crate::style::success("服务已安装并启动");
+        } else {
+            println!("  {}", stderr.trim());
+            crate::style::warning("服务已安装但启动失败，您可以稍后手动启动");
+        }
     }
 
     Ok(())
