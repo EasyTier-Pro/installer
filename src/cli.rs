@@ -129,7 +129,6 @@ async fn run_install(cli: Cli, args: InstallArgs) -> anyhow::Result<()> {
     match deploy::check_existing_install(&install_dir).await {
         ExistingAction::Continue => {}
         ExistingAction::UpdateRequested => {
-            let client = ensure_logged_in(&config, token_store.clone(), client).await?;
             let release = client.get_latest_release().await?;
             return deploy::run_upgrade_from_console(&install_dir, &release, args.version.clone())
                 .await;
@@ -170,9 +169,10 @@ async fn run_update(cli: Cli, args: UpdateArgs) -> anyhow::Result<()> {
     }
 
     let config = Config::new(cli.server.clone())?;
-    let token_store = TokenStore::new(config.credentials_path.clone());
-    let client = ConsoleClient::new(&config.console_base_url, token_store.clone());
-    let client = ensure_authenticated(&config, token_store.clone(), client).await?;
+    let client = ConsoleClient::new(
+        &config.console_base_url,
+        TokenStore::new(config.credentials_path.clone()),
+    );
     let release = client.get_latest_release().await?;
     deploy::run_upgrade_from_console(&install_dir, &release, None).await
 }
@@ -263,22 +263,6 @@ async fn ensure_logged_in(
     }
 
     Ok(client)
-}
-
-async fn ensure_authenticated(
-    config: &Config,
-    token_store: TokenStore,
-    client: ConsoleClient,
-) -> anyhow::Result<ConsoleClient> {
-    if client.is_logged_in() {
-        return Ok(client);
-    }
-
-    login::cmd_login(config, token_store.clone()).await?;
-    Ok(ConsoleClient::new(
-        &config.console_base_url,
-        token_store.clone(),
-    ))
 }
 
 #[cfg(test)]

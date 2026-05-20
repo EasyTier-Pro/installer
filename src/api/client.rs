@@ -344,7 +344,8 @@ impl ConsoleClient {
     }
 
     pub async fn get_latest_release(&self) -> anyhow::Result<LatestReleaseResponse> {
-        self.request(Method::GET, "/api/v1/releases/latest").await
+        self.request_public(Method::GET, "/api/v1/releases/latest")
+            .await
     }
 
     pub async fn get_machine_status(
@@ -365,6 +366,26 @@ impl ConsoleClient {
             &format!("/api/v1/tenants/{}/networks", tenant_id),
         )
         .await
+    }
+
+    pub async fn request_public<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+    ) -> anyhow::Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+        crate::style::debug(&format!("API 公共请求: {} {}", method, url));
+
+        let resp = self.client.request(method, &url).send().await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        crate::style::debug(&format!("API 公共响应 [{}]: {}", status, text));
+
+        if !status.is_success() {
+            anyhow::bail!("请求失败: {}", text)
+        }
+
+        Ok(serde_json::from_str(&text)?)
     }
 
     pub async fn create_network(
@@ -410,5 +431,50 @@ impl ConsoleClient {
             ),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+    use std::thread;
+
+    #[tokio::test]
+    async fn get_latest_release_uses_public_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).expect("read request");
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let _ = tx.send(request);
+            let body = "{\"stable\":{\"version\":\"v1\"}}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+
+        let client = ConsoleClient::new(
+            format!("http://{}", addr),
+            TokenStore::new(PathBuf::from("/tmp/easytier-pro-installer-test-token.json")),
+        );
+        let release = client.get_latest_release().await.expect("release");
+
+        assert_eq!(release.stable.version, "v1");
+        let request = rx.recv().expect("request");
+        assert!(request.starts_with("GET /api/v1/releases/latest HTTP/1.1"));
+        assert!(!request.contains("Authorization:"));
     }
 }
