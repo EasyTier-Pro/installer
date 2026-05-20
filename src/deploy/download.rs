@@ -57,21 +57,21 @@ pub(crate) async fn download_easytier_with_fallback(
     install_dir: &Path,
     version: &str,
 ) -> anyhow::Result<(PathBuf, PathBuf, String)> {
-    let sources = [("gitee", 30u64), ("github_proxy", 30u64), ("github", 60u64)];
+    let sources = [("gitee", 10u64), ("github_proxy", 10u64), ("github", 10u64)];
     let version = normalize_version(version);
 
-    for (source, timeout_secs) in &sources {
+    for (source, connect_timeout_secs) in &sources {
         let url = build_download_url(platform, &version, source);
         crate::style::info(&format!("尝试从 {} 下载...", source.bright_white()));
-        match download_easytier_with_timeout(platform, install_dir, &version, &url, *timeout_secs).await {
+        match download_easytier_with_timeout(platform, install_dir, &version, &url, *connect_timeout_secs).await {
             Ok(result) => return Ok(result),
             Err(e) => {
-                crate::style::warning(&format!("{} 下载失败: {}", source, e));
+                crate::style::warning(&format!("{} 不可用: {}", source, e));
             }
         }
     }
 
-    anyhow::bail!("所有下载源均失败，请检查网络连接或手动下载")
+    anyhow::bail!("所有下载源均不可用，请检查网络连接或手动下载")
 }
 
 async fn download_easytier_with_timeout(
@@ -79,7 +79,7 @@ async fn download_easytier_with_timeout(
     install_dir: &Path,
     version: &str,
     download_url: &str,
-    timeout_secs: u64,
+    connect_timeout_secs: u64,
 ) -> anyhow::Result<(PathBuf, PathBuf, String)> {
     let version = normalize_version(version);
 
@@ -105,7 +105,8 @@ async fn download_easytier_with_timeout(
     let archive_path = cache_dir.join(&asset_name);
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs))
+        .timeout(std::time::Duration::from_secs(600))
         .build()?;
 
     std::fs::create_dir_all(&cache_dir)?;
@@ -116,7 +117,12 @@ async fn download_easytier_with_timeout(
         ));
         std::fs::read(&archive_path)?
     } else {
-        let resp = client.get(download_url).send().await?;
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(connect_timeout_secs),
+            client.get(download_url).send(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("连接超时"))??;
         if !resp.status().is_success() {
             anyhow::bail!(
                 "下载失败 ({}): 请检查网络连接或手动下载 {} 到 {}",
