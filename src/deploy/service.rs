@@ -243,10 +243,16 @@ pub async fn run_uninstall(install_dir: Option<PathBuf>, purge: bool) -> anyhow:
     #[cfg(windows)]
     if !super::platform::is_elevated() {
         crate::style::warning("卸载服务需要管理员权限，正在请求 UAC 提权...");
+        let install_dir = install_dir
+            .clone()
+            .unwrap_or_else(super::platform::default_install_dir);
+        let install_dir_arg = install_dir.to_string_lossy().to_string();
         let mut extra_args = vec!["uninstall"];
         if purge {
             extra_args.push("--purge");
         }
+        extra_args.push("--install-dir");
+        extra_args.push(&install_dir_arg);
         let status = super::platform::relaunch_elevated_with_replaced_args(&extra_args)?;
         if status.success() {
             if purge {

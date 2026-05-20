@@ -349,4 +349,66 @@ mod tests {
 
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
+
+    #[test]
+    fn rejects_legacy_top_level_version_flag() {
+        let err =
+            Cli::try_parse_from(["easytier-pro-installer", "--version", "v2.6.4"]).unwrap_err();
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn parses_hidden_install_service_with_global_install_dir() {
+        let cli = Cli::parse_from([
+            "easytier-pro-installer",
+            "install-service",
+            "--service-core-path",
+            "/tmp/easytier/easytier-core",
+            "--service-config-url",
+            "tcp://console.easytier.cn:22020/token",
+            "--service-machine-id",
+            "machine-id",
+            "--install-dir",
+            "/tmp/easytier",
+        ]);
+
+        let Some(Command::InstallService(args)) = cli.command else {
+            panic!("expected install-service command");
+        };
+        assert_eq!(
+            cli.install_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/easytier"))
+        );
+        assert_eq!(
+            args.service_core_path.as_deref(),
+            Some(std::path::Path::new("/tmp/easytier/easytier-core"))
+        );
+        assert_eq!(
+            args.service_config_url.as_deref(),
+            Some("tcp://console.easytier.cn:22020/token")
+        );
+        assert_eq!(args.service_machine_id.as_deref(), Some("machine-id"));
+    }
+
+    #[test]
+    fn parses_hidden_upgrade_service_with_global_install_dir() {
+        let cli = Cli::parse_from([
+            "easytier-pro-installer",
+            "upgrade-service",
+            "--version",
+            "v2.6.4",
+            "--install-dir",
+            "/tmp/easytier",
+        ]);
+
+        let Some(Command::UpgradeService(args)) = cli.command else {
+            panic!("expected upgrade-service command");
+        };
+        assert_eq!(
+            cli.install_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/easytier"))
+        );
+        assert_eq!(args.version.as_deref(), Some("v2.6.4"));
+    }
 }

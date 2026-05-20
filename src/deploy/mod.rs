@@ -391,12 +391,15 @@ pub(crate) async fn run_deploy(
     if !platform::is_elevated() {
         crate::style::warning("安装服务需要管理员权限，正在请求 UAC 提权...");
         let core_path_str = core_path.to_string_lossy().to_string();
+        let install_dir_str = install_dir.to_string_lossy().to_string();
         let mut extra_args = vec![
             "install-service",
             "--service-core-path",
             &core_path_str,
             "--service-config-url",
             &full_config_url,
+            "--install-dir",
+            &install_dir_str,
         ];
         if !machine_id.is_empty() {
             extra_args.push("--service-machine-id");
@@ -472,10 +475,13 @@ pub(crate) async fn run_upgrade(install_dir: &Path, target_version: &str) -> any
     if !platform::is_elevated() {
         crate::style::warning("升级服务需要管理员权限，正在请求 UAC 提权...");
         let version_arg = target_version.clone();
+        let install_dir_arg = install_dir.to_string_lossy().to_string();
         let status = platform::relaunch_elevated_with_replaced_args(&[
             "upgrade-service",
             "--version",
             &version_arg,
+            "--install-dir",
+            &install_dir_arg,
         ])?;
         if status.success() {
             crate::style::success("服务已重启");
