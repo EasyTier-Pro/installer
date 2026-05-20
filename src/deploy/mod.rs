@@ -249,17 +249,47 @@ pub(crate) async fn run_upgrade(
         target_version.bright_white()
     ));
 
+    #[cfg(windows)]
+    if !platform::is_elevated() {
+        crate::style::warning("升级服务需要管理员权限，正在请求 UAC 提权...");
+        let version_arg = target_version.clone();
+        let status =
+            platform::relaunch_elevated_with_args(&["--upgrade", "--version", &version_arg])?;
+        if status.success() {
+            crate::style::success("服务已重启");
+            println!();
+            crate::style::success(&format!(
+                "{} 已升级至 {}，正在运行。",
+                "EasyTier".bright_white(),
+                target_version.bright_white()
+            ));
+            return Ok(());
+        }
+        anyhow::bail!("提权后的升级进程执行失败，请在管理员窗口中查看详细错误");
+    }
+
+    let current_cli_path = service::find_easytier_cli(install_dir)?;
+    println!();
+    crate::style::info("正在停止服务...");
+    let stop = tokio::process::Command::new(&current_cli_path)
+        .args(["service", "--name", service::SERVICE_NAME, "stop"])
+        .output()
+        .await?;
+    if !stop.status.success() {
+        let stderr = String::from_utf8_lossy(&stop.stderr);
+        if !stderr.is_empty() {
+            println!("  {}", stderr.trim());
+        }
+        anyhow::bail!("停止服务失败，无法继续升级");
+    }
+    crate::style::success("服务已停止");
+
     let (_, cli_path, _) =
         download::download_easytier(&platform, install_dir, Some(target_version.clone())).await?;
     crate::style::success(&format!("已下载 {}", target_version));
 
     println!();
-    crate::style::info("正在重启服务...");
-    let _ = tokio::process::Command::new(&cli_path)
-        .args(["service", "--name", service::SERVICE_NAME, "stop"])
-        .output()
-        .await;
-
+    crate::style::info("正在启动服务...");
     let start = tokio::process::Command::new(&cli_path)
         .args(["service", "--name", service::SERVICE_NAME, "start"])
         .output()

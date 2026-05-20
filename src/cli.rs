@@ -42,6 +42,9 @@ pub struct Cli {
     pub install_service: bool,
 
     #[arg(long, hide = true)]
+    pub upgrade: bool,
+
+    #[arg(long, hide = true)]
     pub service_core_path: Option<PathBuf>,
 
     #[arg(long, hide = true)]
@@ -50,7 +53,7 @@ pub struct Cli {
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     crate::style::debug(&format!(
-        "cli::run 开始: server={:?}, config_server={:?}, install_dir={:?}, version={:?}, status={}, uninstall={}, purge={}, debug={}, install_service={}",
+        "cli::run 开始: server={:?}, config_server={:?}, install_dir={:?}, version={:?}, status={}, uninstall={}, purge={}, debug={}, install_service={}, upgrade={}",
         cli.server,
         cli.config_server,
         cli.install_dir,
@@ -59,7 +62,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         cli.uninstall,
         cli.purge,
         cli.debug,
-        cli.install_service
+        cli.install_service,
+        cli.upgrade
     ));
 
     if cli.status {
@@ -101,6 +105,20 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             core_path.display()
         ));
         return deploy::service::install_service(&cli_path, &core_path, &config_url).await;
+    }
+
+    if cli.upgrade {
+        let install_dir = cli
+            .install_dir
+            .clone()
+            .unwrap_or_else(deploy::default_install_dir);
+        crate::style::debug(&format!(
+            "进入 --upgrade 分支: install_dir={}, version={:?}, elevated={}",
+            install_dir.display(),
+            cli.version,
+            deploy::platform::is_elevated()
+        ));
+        return deploy::run_upgrade(&install_dir, cli.version.clone()).await;
     }
 
     let install_dir = cli
