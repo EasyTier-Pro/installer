@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-pub(crate) const SERVICE_NAME: &str = "easytier-pro-installer";
+pub(crate) const SERVICE_NAME: &str = "easytier-pro";
 
 pub(crate) fn service_not_installed(output: &std::process::Output) -> bool {
     let stdout = String::from_utf8_lossy(&output.stdout);
