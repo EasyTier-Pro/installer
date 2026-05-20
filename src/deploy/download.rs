@@ -106,7 +106,6 @@ async fn download_easytier_with_timeout(
 
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs))
-        .timeout(std::time::Duration::from_secs(600))
         .build()?;
 
     std::fs::create_dir_all(&cache_dir)?;
