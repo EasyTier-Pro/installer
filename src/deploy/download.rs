@@ -1,4 +1,4 @@
-use crate::deploy::platform::Platform;
+use crate::deploy::platform::{Platform, default_cache_dir};
 use colored::Colorize;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -41,6 +41,8 @@ pub(crate) async fn download_easytier(
     }
 
     let asset_name = format!("easytier-{}-{}-{}.zip", platform.os, platform.arch, version);
+    let cache_dir = default_cache_dir();
+    let archive_path = cache_dir.join(&asset_name);
     let download_url = if is_specific_version {
         format!(
             "https://github.com/EasyTier/EasyTier/releases/download/{}/{}",
@@ -57,33 +59,49 @@ pub(crate) async fn download_easytier(
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
 
-    let resp = client.get(&download_url).send().await?;
-    if !resp.status().is_success() {
-        anyhow::bail!(
-            "下载失败 ({}): 请检查网络连接或手动下载 {} 到 {}",
-            resp.status(),
-            asset_name,
-            install_dir.display()
+    std::fs::create_dir_all(&cache_dir)?;
+    let zip_data = if archive_path.exists() {
+        crate::style::info(&format!(
+            "使用缓存压缩包 {}",
+            archive_path.to_string_lossy().bright_white()
+        ));
+        std::fs::read(&archive_path)?
+    } else {
+        let resp = client.get(&download_url).send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!(
+                "下载失败 ({}): 请检查网络连接或手动下载 {} 到 {}",
+                resp.status(),
+                asset_name,
+                cache_dir.display()
+            );
+        }
+
+        let total_size = resp.content_length().unwrap_or(0);
+        let pb = indicatif::ProgressBar::new(total_size);
+        pb.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
+                .progress_chars("#>-"),
         );
-    }
 
-    let total_size = resp.content_length().unwrap_or(0);
-    let pb = indicatif::ProgressBar::new(total_size);
-    pb.set_style(
-        indicatif::ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
-            .progress_chars("#>-"),
-    );
+        let mut zip_data = Vec::new();
+        let mut stream = resp.bytes_stream();
+        use tokio_stream::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            zip_data.extend_from_slice(&chunk);
+            pb.inc(chunk.len() as u64);
+        }
+        pb.finish_and_clear();
 
-    let mut zip_data = Vec::new();
-    let mut stream = resp.bytes_stream();
-    use tokio_stream::StreamExt;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        zip_data.extend_from_slice(&chunk);
-        pb.inc(chunk.len() as u64);
-    }
-    pb.finish_and_clear();
+        std::fs::write(&archive_path, &zip_data)?;
+        crate::style::info(&format!(
+            "已缓存压缩包到 {}",
+            archive_path.to_string_lossy().bright_white()
+        ));
+        zip_data
+    };
 
     extract_zip(&zip_data, install_dir)?;
 

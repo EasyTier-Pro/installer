@@ -29,10 +29,29 @@ pub struct Cli {
     /// 仅卸载服务
     #[arg(long)]
     pub uninstall: bool,
+
+    /// 彻底删除安装目录和缓存压缩包
+    #[arg(long)]
+    pub purge: bool,
+
+    /// 开启调试日志，默认写入当前目录下的 easytier-pro-installer.debug.log
+    #[arg(long)]
+    pub debug: bool,
 }
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
-    let config = Config::new(cli.server)?;
+    crate::style::debug(&format!(
+        "cli::run 开始: server={:?}, config_server={:?}, install_dir={:?}, version={:?}, status={}, uninstall={}, purge={}, debug={}",
+        cli.server,
+        cli.config_server,
+        cli.install_dir,
+        cli.version,
+        cli.status,
+        cli.uninstall,
+        cli.purge,
+        cli.debug
+    ));
+    let config = Config::new(cli.server.clone())?;
     let token_store = TokenStore::new(config.credentials_path.clone());
 
     if cli.status {
@@ -44,15 +63,13 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             .install_dir
             .clone()
             .unwrap_or_else(deploy::default_install_dir);
-        if let Err(e) = deploy::check_install_dir_writable(&install_dir) {
-            if !deploy::platform::is_elevated() {
-                crate::style::warning("需要管理员权限，正在尝试自动提权...");
-                let status = deploy::platform::relaunch_elevated()?;
-                std::process::exit(status.code().unwrap_or(1));
-            }
-            return Err(e);
-        }
-        return deploy::run_uninstall(Some(install_dir)).await;
+        crate::style::debug(&format!(
+            "进入 --uninstall 分支: install_dir={}, purge={}, elevated={}",
+            install_dir.display(),
+            cli.purge,
+            deploy::platform::is_elevated()
+        ));
+        return deploy::run_uninstall(Some(install_dir), cli.purge).await;
     }
 
     let install_dir = cli

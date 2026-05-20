@@ -57,6 +57,29 @@ pub(crate) fn default_install_dir() -> PathBuf {
     }
 }
 
+pub(crate) fn default_cache_dir() -> PathBuf {
+    if let Some(dirs) = directories::ProjectDirs::from("cn", "easytier", "agent") {
+        return dirs.cache_dir().join("downloads");
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let local_app_data = std::env::var("LOCALAPPDATA")
+            .unwrap_or_else(|_| r"C:\Users\Default\AppData\Local".to_string());
+        PathBuf::from(local_app_data)
+            .join("easytier")
+            .join("downloads")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/tmp/easytier/downloads")
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        PathBuf::from("/tmp/easytier/downloads")
+    }
+}
+
 /// 检测当前是否以 root / 管理员身份运行。
 pub(crate) fn is_elevated() -> bool {
     #[cfg(unix)]
@@ -105,8 +128,34 @@ pub(crate) fn relaunch_elevated_with_args(extra_args: &[&str]) -> anyhow::Result
         use std::os::windows::process::ExitStatusExt;
 
         let exe = std::env::current_exe()?;
+        crate::style::debug(&format!("Windows 提权开始: exe={}", exe.display()));
+        if let Ok(cwd) = std::env::current_dir() {
+            crate::style::debug(&format!("Windows 提权开始: cwd={}", cwd.display()));
+        }
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            crate::style::debug(&format!("Windows 提权开始: LOCALAPPDATA={}", local_app_data));
+        }
         let mut args: Vec<String> = std::env::args().skip(1).collect();
+        crate::style::debug(&format!("Windows 提权开始: 原始参数={:?}", args));
+        let has_install_dir_arg = args
+            .iter()
+            .any(|arg| arg == "--install-dir" || arg == "-i");
+        if !has_install_dir_arg {
+            let install_dir = default_install_dir();
+            crate::style::debug(&format!(
+                "Windows 提权开始: 自动追加 install_dir={}",
+                install_dir.display()
+            ));
+            args.push("--install-dir".to_string());
+            args.push(install_dir.to_string_lossy().to_string());
+        }
+        let has_debug_arg = args.iter().any(|arg| arg == "--debug");
+        if crate::style::debug_enabled() && !has_debug_arg {
+            crate::style::debug("Windows 提权开始: 自动追加 --debug");
+            args.push("--debug".to_string());
+        }
         args.extend(extra_args.iter().map(|s| s.to_string()));
+        crate::style::debug(&format!("Windows 提权开始: 最终参数={:?}", args));
 
         // 构建参数字符串（简单转义：含空格则加引号）
         let mut params = String::new();
@@ -122,16 +171,18 @@ pub(crate) fn relaunch_elevated_with_args(extra_args: &[&str]) -> anyhow::Result
                 params.push_str(arg);
             }
         }
+        crate::style::debug(&format!("Windows 提权开始: 参数字符串={}", params));
 
         let exe_wide: Vec<u16> =
             std::ffi::OsStr::new(&exe).encode_wide().chain(Some(0)).collect();
         let param_wide: Vec<u16> = params.encode_utf16().chain(Some(0)).collect();
         let verb_wide: Vec<u16> = "runas".encode_utf16().chain(Some(0)).collect();
+        let cwd = std::env::current_dir()?;
+        let cwd_wide: Vec<u16> = cwd.as_os_str().encode_wide().chain(Some(0)).collect();
 
         let mut sei = unsafe { std::mem::zeroed::<windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW>() };
         sei.cbSize = std::mem::size_of::<windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW>() as u32;
-        sei.fMask = windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS
-            | windows_sys::Win32::UI::Shell::SEE_MASK_NO_CONSOLE;
+        sei.fMask = windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS;
         sei.hwnd = std::ptr::null_mut();
         sei.lpVerb = verb_wide.as_ptr();
         sei.lpFile = exe_wide.as_ptr();
@@ -140,7 +191,7 @@ pub(crate) fn relaunch_elevated_with_args(extra_args: &[&str]) -> anyhow::Result
         } else {
             param_wide.as_ptr()
         };
-        sei.lpDirectory = std::ptr::null();
+        sei.lpDirectory = cwd_wide.as_ptr();
         sei.nShow = windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
         let ok = unsafe { windows_sys::Win32::UI::Shell::ShellExecuteExW(&mut sei) };
@@ -148,6 +199,7 @@ pub(crate) fn relaunch_elevated_with_args(extra_args: &[&str]) -> anyhow::Result
             let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
             anyhow::bail!("请求管理员权限失败 (ShellExecuteExW 错误码: {})", err);
         }
+        crate::style::debug("Windows 提权开始: ShellExecuteExW 调用成功，等待管理员子进程退出");
 
         if sei.hProcess.is_null() {
             anyhow::bail!("无法获取提升后进程的句柄");
@@ -165,6 +217,10 @@ pub(crate) fn relaunch_elevated_with_args(extra_args: &[&str]) -> anyhow::Result
                 windows_sys::Win32::Foundation::CloseHandle(sei.hProcess);
                 anyhow::bail!("无法获取提升后进程的退出码");
             }
+            crate::style::debug(&format!(
+                "Windows 提权结束: 管理员子进程退出码={}",
+                exit_code
+            ));
 
             windows_sys::Win32::Foundation::CloseHandle(sei.hProcess);
 

@@ -79,8 +79,11 @@ EasyTier 已就绪: ...
 # 查看服务状态
 ./easytier-pro-installer --status
 
-# 卸载服务
+# 卸载服务，保留已下载文件和缓存
 ./easytier-pro-installer --uninstall
+
+# 彻底卸载，删除安装目录和缓存压缩包
+./easytier-pro-installer --uninstall --purge
 ```
 
 ## 可选参数
@@ -91,6 +94,8 @@ EasyTier 已就绪: ...
 | `--config-server` | `EASYTIER_CONFIG_SERVER` | 覆盖 config server 地址 |
 | `-i, --install-dir` | `EASYTIER_INSTALL_DIR` | 安装目录 |
 | `-v, --version` | `EASYTIER_VERSION` | 指定 EasyTier 版本号 |
+| `--debug` | - | 开启调试日志，默认写入当前目录下的 `easytier-pro-installer.debug.log` |
+| `--purge` | - | 配合 `--uninstall` 使用，彻底删除安装目录和缓存压缩包 |
 
 ## 构建
 

@@ -25,8 +25,7 @@ pub(crate) async fn check_existing_install(
         Ok(o) => o,
         Err(_) => return ExistingAction::Continue,
     };
-    let status_stdout = String::from_utf8_lossy(&status_output.stdout);
-    if status_stdout.contains("Service is not installed") {
+    if service::service_not_installed(&status_output) {
         return ExistingAction::Continue;
     }
 
@@ -51,65 +50,18 @@ pub(crate) async fn check_existing_install(
 
     match choice {
         0 => ExistingAction::Handled(Ok(())),
-        1 => ExistingAction::Handled(do_uninstall(&cli_path).await),
+        1 => ExistingAction::Handled(do_uninstall(install_dir).await),
         2 => ExistingAction::Handled(super::run_upgrade(install_dir, version_override).await),
         3 => ExistingAction::Continue,
         _ => ExistingAction::Handled(Ok(())),
     }
 }
 
-async fn do_uninstall(cli_path: &Path) -> anyhow::Result<()> {
-    #[cfg(windows)]
-    if !crate::deploy::platform::is_elevated() {
-        crate::style::warning("卸载服务需要管理员权限，正在请求 UAC 提权...");
-        let status = crate::deploy::platform::relaunch_elevated_with_args(&["--uninstall"])?;
-        std::process::exit(status.code().unwrap_or(0));
-    }
-
-    crate::style::info("正在卸载服务...");
-    let _ = tokio::process::Command::new(cli_path)
-        .args(["service", "--name", service::SERVICE_NAME, "stop"])
-        .output()
-        .await;
-    let output = tokio::process::Command::new(cli_path)
-        .args(["service", "--name", service::SERVICE_NAME, "uninstall"])
-        .output()
-        .await;
-
-    match output {
-        Ok(o) if o.status.success() => {}
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            if !stderr.contains("No such file or directory") {
-                if !stderr.is_empty() {
-                    eprintln!("{}", stderr.trim());
-                }
-                return Err(anyhow::anyhow!(
-                    "卸载服务失败，请使用 sudo 或管理员身份运行"
-                ));
-            }
-        }
-        Err(e) => {
-            return Err(anyhow::anyhow!("卸载服务失败: {}", e));
-        }
-    }
-
-    service::systemd_daemon_reload().await;
-
-    let verify = tokio::process::Command::new(cli_path)
-        .args(["service", "--name", service::SERVICE_NAME, "status"])
-        .output()
-        .await;
-    if let Ok(v) = verify {
-        let stdout = String::from_utf8_lossy(&v.stdout);
-        if stdout.contains("Service is not installed") {
-            crate::style::success("EasyTier 服务已卸载");
-        } else {
-            crate::style::warning("卸载未生效，服务仍然存在");
-            return Err(anyhow::anyhow!("卸载未生效，请手动检查 easytier 进程"));
-        }
-    } else {
-        crate::style::success("EasyTier 服务已卸载");
-    }
-    Ok(())
+async fn do_uninstall(install_dir: &Path) -> anyhow::Result<()> {
+    crate::style::debug(&format!(
+        "交互卸载开始: install_dir={}, elevated={}",
+        install_dir.display(),
+        crate::deploy::platform::is_elevated()
+    ));
+    service::run_uninstall(Some(install_dir.to_path_buf()), false).await
 }
