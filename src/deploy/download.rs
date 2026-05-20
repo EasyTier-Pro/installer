@@ -12,9 +12,13 @@ pub(crate) fn normalize_version(version: &str) -> String {
 }
 
 pub(crate) fn asset_name(platform: &Platform, version: &str) -> String {
+    let os = match platform.os {
+        "darwin" => "macos",
+        other => other,
+    };
     format!(
         "easytier-{}-{}-{}.zip",
-        platform.os,
+        os,
         platform.arch,
         normalize_version(version)
     )

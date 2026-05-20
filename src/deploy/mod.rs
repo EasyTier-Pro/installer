@@ -8,7 +8,7 @@ pub(crate) use check::{ExistingAction, check_existing_install};
 pub(crate) use platform::default_install_dir;
 pub(crate) use service::{run_status, run_uninstall};
 
-use crate::api::client::{ConsoleClient, GetStartedResponse, TenantSummary};
+use crate::api::client::{ConsoleClient, GetStartedResponse, LatestReleaseResponse, TenantSummary};
 use crate::config::Config;
 use colored::Colorize;
 use std::path::{Path, PathBuf};
@@ -62,6 +62,7 @@ pub(crate) async fn run_deploy(
     install_dir: Option<PathBuf>,
     config_server_base: Option<String>,
     version_override: Option<String>,
+    download_source: &str,
 ) -> anyhow::Result<()> {
     let install_dir = install_dir.unwrap_or_else(default_install_dir);
     std::fs::create_dir_all(&install_dir)?;
@@ -140,8 +141,9 @@ pub(crate) async fn run_deploy(
 
     // 4. 检测平台并下载 easytier
     let platform = platform::detect_platform()?;
+    let stable_version = &get_started.release_channels.stable.version;
     let (download_version, download_url) =
-        resolve_console_release(get_started, &platform, version_override)?;
+        resolve_release(stable_version, &platform, version_override, download_source)?;
     crate::style::info(&format!(
         "正在下载 easytier {} ({}-{})...",
         download_version.bright_white(),
@@ -198,12 +200,14 @@ pub(crate) async fn run_deploy(
 
 pub(crate) async fn run_upgrade_from_console(
     install_dir: &Path,
-    get_started: &GetStartedResponse,
+    release: &LatestReleaseResponse,
     version_override: Option<String>,
+    download_source: &str,
 ) -> anyhow::Result<()> {
     let platform = platform::detect_platform()?;
+    let stable_version = &release.stable.version;
     let (target_version, download_url) =
-        resolve_console_release(get_started, &platform, version_override)?;
+        resolve_release(stable_version, &platform, version_override, download_source)?;
     crate::style::debug(&format!(
         "准备升级: target_version={}, download_url={}",
         target_version, download_url
@@ -331,78 +335,42 @@ pub(crate) async fn load_console_bootstrap(
     Ok((tenant, get_started))
 }
 
-fn resolve_console_release(
-    get_started: &GetStartedResponse,
+fn resolve_release(
+    stable_version: &str,
     platform: &platform::Platform,
     version_override: Option<String>,
+    download_source: &str,
 ) -> anyhow::Result<(String, String)> {
     let version = if let Some(version) = version_override {
         download::normalize_version(&version)
-    } else if !get_started.release_channels.stable.version.is_empty() {
-        download::normalize_version(&get_started.release_channels.stable.version)
+    } else if !stable_version.is_empty() {
+        download::normalize_version(stable_version)
     } else {
         anyhow::bail!("Console 未返回可用版本，无法继续下载")
     };
 
-    let download_url = resolve_console_download_url(&get_started.downloads, platform, &version)?;
+    let download_url = build_download_url(platform, &version, download_source);
     Ok((version, download_url))
 }
 
-fn resolve_console_download_url(
-    downloads: &std::collections::HashMap<String, String>,
+fn build_download_url(
     platform: &platform::Platform,
     version: &str,
-) -> anyhow::Result<String> {
+    source: &str,
+) -> String {
     let asset_name = download::asset_name(platform, version);
-    let platform_dash = format!("{}-{}", platform.os, platform.arch);
-    let platform_underscore = format!("{}_{}", platform.os, platform.arch);
-    let version_no_prefix = version.trim_start_matches('v');
-    let candidate_keys = [
-        asset_name.as_str(),
-        platform_dash.as_str(),
-        platform_underscore.as_str(),
-    ];
-
-    for key in candidate_keys {
-        if let Some(url) = downloads.get(key)
-            && !url.trim().is_empty()
-        {
-            return Ok(url.clone());
-        }
+    match source.to_lowercase().as_str() {
+        "github" => format!(
+            "https://github.com/EasyTier/EasyTier/releases/download/{}/{}",
+            version, asset_name
+        ),
+        "github_proxy" | "github-proxy" => format!(
+            "https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/download/{}/{}",
+            version, asset_name
+        ),
+        _ => format!(
+            "https://gitee.com/EasyTier/EasyTier/releases/download/{}/{}",
+            version, asset_name
+        ),
     }
-
-    let mut matches = downloads.iter().filter(|(key, url)| {
-        let key = key.as_str();
-        let url = url.as_str();
-        let platform_hit = key.contains(&platform_dash)
-            || key.contains(&platform_underscore)
-            || url.contains(&platform_dash)
-            || url.contains(&platform_underscore);
-        let version_hit = key.contains(version)
-            || key.contains(version_no_prefix)
-            || url.contains(version)
-            || url.contains(version_no_prefix);
-        let asset_hit = key.contains(&asset_name) || url.contains(&asset_name);
-        asset_hit || (platform_hit && version_hit)
-    });
-
-    if let Some((_, url)) = matches.next()
-        && matches.next().is_none()
-        && !url.trim().is_empty()
-    {
-        return Ok(url.clone());
-    }
-
-    let mut available_keys: Vec<String> = downloads.keys().cloned().collect();
-    available_keys.sort();
-    anyhow::bail!(
-        "Console 未返回平台 {} 对应的下载地址（目标版本 {}，可用键: {}）",
-        platform_dash,
-        version,
-        if available_keys.is_empty() {
-            "无".to_string()
-        } else {
-            available_keys.join(", ")
-        }
-    )
 }

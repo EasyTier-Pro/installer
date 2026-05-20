@@ -52,6 +52,10 @@ pub struct Cli {
 
     #[arg(long, hide = true)]
     pub service_config_url: Option<String>,
+
+    /// 下载源：gitee（默认）, github, github_proxy
+    #[arg(long, env = "EASYTIER_DOWNLOAD_SOURCE", default_value = "gitee")]
+    pub download_source: String,
 }
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
@@ -154,11 +158,12 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     match deploy::check_existing_install(&install_dir).await {
         ExistingAction::Continue => {}
         ExistingAction::UpdateRequested => {
-            let get_started = client.get_latest_release().await?;
+            let release = client.get_latest_release().await?;
             return deploy::run_upgrade_from_console(
                 &install_dir,
-                &get_started,
+                &release,
                 cli.version.clone(),
+                &cli.download_source,
             )
             .await;
         }
@@ -176,6 +181,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         cli.install_dir,
         cli.config_server,
         cli.version,
+        &cli.download_source,
     )
     .await
 }

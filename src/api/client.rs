@@ -87,6 +87,21 @@ pub struct GetStartedResponse {
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct LatestReleaseResponse {
+    #[serde(default)]
+    pub stable: ReleaseChannelInfo,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub testing: ReleaseChannelInfo,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct ReleaseChannelInfo {
+    #[serde(default)]
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct GetStartedReleaseChannels {
     #[serde(default)]
     pub stable: GetStartedReleaseChannel,
@@ -234,7 +249,7 @@ impl ConsoleClient {
         .await
     }
 
-    pub async fn get_latest_release(&self) -> anyhow::Result<GetStartedResponse> {
+    pub async fn get_latest_release(&self) -> anyhow::Result<LatestReleaseResponse> {
         self.request(Method::GET, "/api/v1/releases/latest").await
     }
 }
