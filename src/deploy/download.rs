@@ -103,31 +103,23 @@ pub(crate) async fn download_easytier(
         zip_data
     };
 
-    extract_zip(&zip_data, install_dir)?;
-
-    let mut found = false;
-    for entry in std::fs::read_dir(install_dir)? {
-        let entry = entry?;
-        let p = entry.path();
-        if p.is_dir() {
-            let sub_core = p.join(core_name);
-            let sub_cli = p.join(cli_name);
-            if sub_core.exists() && sub_cli.exists() {
-                std::fs::copy(&sub_core, &core_path)?;
-                std::fs::copy(&sub_cli, &cli_path)?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&core_path, std::fs::Permissions::from_mode(0o755))?;
-                    std::fs::set_permissions(&cli_path, std::fs::Permissions::from_mode(0o755))?;
-                }
-                found = true;
-                break;
-            }
-        }
+    let staging_dir = install_dir.join(".extract-tmp");
+    if staging_dir.exists() {
+        std::fs::remove_dir_all(&staging_dir)?;
     }
-    if !found {
-        anyhow::bail!("解压后未找到 easytier-core 和 easytier-cli");
+    std::fs::create_dir_all(&staging_dir)?;
+    extract_zip(&zip_data, &staging_dir)?;
+
+    let package_root = find_package_root(&staging_dir, core_name, cli_name)?
+        .ok_or_else(|| anyhow::anyhow!("解压后未找到 easytier-core 和 easytier-cli"))?;
+    sync_dir_contents(&package_root, install_dir)?;
+    std::fs::remove_dir_all(&staging_dir)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&core_path, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(&cli_path, std::fs::Permissions::from_mode(0o755))?;
     }
 
     std::fs::write(install_dir.join(".version"), &version)?;
@@ -187,6 +179,41 @@ fn extract_zip(data: &[u8], dest: &Path) -> anyhow::Result<()> {
                 }
                 outfile.write_all(&buf[..n])?;
             }
+        }
+    }
+    Ok(())
+}
+
+fn find_package_root(extract_dir: &Path, core_name: &str, cli_name: &str) -> anyhow::Result<Option<PathBuf>> {
+    if extract_dir.join(core_name).exists() && extract_dir.join(cli_name).exists() {
+        return Ok(Some(extract_dir.to_path_buf()));
+    }
+
+    for entry in std::fs::read_dir(extract_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() && path.join(core_name).exists() && path.join(cli_name).exists() {
+            return Ok(Some(path));
+        }
+    }
+
+    Ok(None)
+}
+
+fn sync_dir_contents(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        if src_path.is_dir() {
+            std::fs::create_dir_all(&dst_path)?;
+            sync_dir_contents(&src_path, &dst_path)?;
+        } else {
+            if let Some(parent) = dst_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&src_path, &dst_path)?;
         }
     }
     Ok(())
