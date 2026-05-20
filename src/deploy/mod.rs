@@ -181,6 +181,14 @@ pub(crate) async fn run_deploy(
 
     println!();
     crate::style::info("正在安装并启动服务...");
+
+    #[cfg(windows)]
+    if !platform::is_elevated() {
+        crate::style::warning("安装服务需要管理员权限，正在请求 UAC 提权...");
+        let status = platform::relaunch_elevated()?;
+        std::process::exit(status.code().unwrap_or(0));
+    }
+
     service::install_service(&cli_path, &core_path, &full_config_url).await?;
 
     println!();

@@ -75,7 +75,7 @@ pub(crate) fn is_elevated() -> bool {
 }
 
 /// 尝试以提升后的权限重新运行当前程序。
-/// Unix 下用 sudo -E；Windows 下返回错误提示用户手动操作。
+/// Unix 下用 sudo -E；Windows 下通过 UAC (ShellExecuteExW + runas) 自动提权。
 pub(crate) fn relaunch_elevated() -> anyhow::Result<std::process::ExitStatus> {
     #[cfg(unix)]
     {
@@ -96,9 +96,74 @@ pub(crate) fn relaunch_elevated() -> anyhow::Result<std::process::ExitStatus> {
     }
     #[cfg(windows)]
     {
-        anyhow::bail!(
-            "需要管理员权限，请右键点击 PowerShell/CMD 选择\"以管理员身份运行\"，然后重新执行本程序"
-        )
+        use std::os::windows::ffi::OsStrExt;
+
+        let exe = std::env::current_exe()?;
+        let args: Vec<String> = std::env::args().skip(1).collect();
+
+        // 构建参数字符串（简单转义：含空格则加引号）
+        let mut params = String::new();
+        for (i, arg) in args.iter().enumerate() {
+            if i > 0 {
+                params.push(' ');
+            }
+            if arg.contains(' ') || arg.contains('\t') {
+                params.push('"');
+                params.push_str(arg);
+                params.push('"');
+            } else {
+                params.push_str(arg);
+            }
+        }
+
+        let exe_wide: Vec<u16> =
+            std::ffi::OsStr::new(&exe).encode_wide().chain(Some(0)).collect();
+        let param_wide: Vec<u16> = params.encode_utf16().chain(Some(0)).collect();
+        let verb_wide: Vec<u16> = "runas".encode_utf16().chain(Some(0)).collect();
+
+        let mut sei = unsafe { std::mem::zeroed::<windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW>() };
+        sei.cbSize = std::mem::size_of::<windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW>() as u32;
+        sei.fMask = windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS
+            | windows_sys::Win32::UI::Shell::SEE_MASK_NO_CONSOLE;
+        sei.hwnd = 0;
+        sei.lpVerb = verb_wide.as_ptr();
+        sei.lpFile = exe_wide.as_ptr();
+        sei.lpParameters = if params.is_empty() {
+            std::ptr::null()
+        } else {
+            param_wide.as_ptr()
+        };
+        sei.lpDirectory = std::ptr::null();
+        sei.nShow = windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let ok = unsafe { windows_sys::Win32::UI::Shell::ShellExecuteExW(&mut sei) };
+        if ok == 0 {
+            let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+            anyhow::bail!("请求管理员权限失败 (ShellExecuteExW 错误码: {})", err);
+        }
+
+        if sei.hProcess.is_null() {
+            anyhow::bail!("无法获取提升后进程的句柄");
+        }
+
+        unsafe {
+            windows_sys::Win32::System::Threading::WaitForSingleObject(
+                sei.hProcess,
+                windows_sys::Win32::System::Threading::INFINITE,
+            );
+
+            let mut exit_code: u32 = 0;
+            if windows_sys::Win32::System::Threading::GetExitCodeProcess(sei.hProcess, &mut exit_code) == 0
+            {
+                windows_sys::Win32::Foundation::CloseHandle(sei.hProcess);
+                anyhow::bail!("无法获取提升后进程的退出码");
+            }
+
+            windows_sys::Win32::Foundation::CloseHandle(sei.hProcess);
+
+            // Windows 退出码是 u32；std::process::ExitStatus 的 from_raw 在 Windows 上接受 u32
+            Ok(std::process::ExitStatus::from_raw(exit_code))
+        }
     }
 }
 
