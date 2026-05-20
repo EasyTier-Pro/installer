@@ -59,6 +59,13 @@ pub(crate) async fn check_existing_install(
 }
 
 async fn do_uninstall(cli_path: &Path) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    if !crate::deploy::platform::is_elevated() {
+        crate::style::warning("卸载服务需要管理员权限，正在请求 UAC 提权...");
+        let status = crate::deploy::platform::relaunch_elevated_with_args(&["--uninstall"])?;
+        std::process::exit(status.code().unwrap_or(0));
+    }
+
     crate::style::info("正在卸载服务...");
     let _ = tokio::process::Command::new(cli_path)
         .args(["service", "--name", service::SERVICE_NAME, "stop"])

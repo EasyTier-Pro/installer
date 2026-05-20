@@ -129,6 +129,13 @@ pub async fn run_status(install_dir: Option<PathBuf>) -> anyhow::Result<()> {
 }
 
 pub async fn run_uninstall(install_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    if !super::platform::is_elevated() {
+        crate::style::warning("卸载服务需要管理员权限，正在请求 UAC 提权...");
+        let status = super::platform::relaunch_elevated()?;
+        std::process::exit(status.code().unwrap_or(0));
+    }
+
     let install_dir = install_dir.unwrap_or_else(super::platform::default_install_dir);
     let cli_path = find_easytier_cli(&install_dir)?;
 

@@ -77,10 +77,15 @@ pub(crate) fn is_elevated() -> bool {
 /// 尝试以提升后的权限重新运行当前程序。
 /// Unix 下用 sudo -E；Windows 下通过 UAC (ShellExecuteExW + runas) 自动提权。
 pub(crate) fn relaunch_elevated() -> anyhow::Result<std::process::ExitStatus> {
+    relaunch_elevated_with_args(&[])
+}
+
+pub(crate) fn relaunch_elevated_with_args(extra_args: &[&str]) -> anyhow::Result<std::process::ExitStatus> {
     #[cfg(unix)]
     {
         let exe = std::env::current_exe()?;
-        let args = std::env::args().skip(1).collect::<Vec<String>>();
+        let mut args = std::env::args().skip(1).collect::<Vec<String>>();
+        args.extend(extra_args.iter().map(|s| s.to_string()));
 
         let mut cmd = std::process::Command::new("sudo");
         cmd.arg("-E").arg(&exe).args(&args);
@@ -97,9 +102,11 @@ pub(crate) fn relaunch_elevated() -> anyhow::Result<std::process::ExitStatus> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::process::ExitStatusExt;
 
         let exe = std::env::current_exe()?;
-        let args: Vec<String> = std::env::args().skip(1).collect();
+        let mut args: Vec<String> = std::env::args().skip(1).collect();
+        args.extend(extra_args.iter().map(|s| s.to_string()));
 
         // 构建参数字符串（简单转义：含空格则加引号）
         let mut params = String::new();
@@ -125,7 +132,7 @@ pub(crate) fn relaunch_elevated() -> anyhow::Result<std::process::ExitStatus> {
         sei.cbSize = std::mem::size_of::<windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW>() as u32;
         sei.fMask = windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS
             | windows_sys::Win32::UI::Shell::SEE_MASK_NO_CONSOLE;
-        sei.hwnd = 0;
+        sei.hwnd = std::ptr::null_mut();
         sei.lpVerb = verb_wide.as_ptr();
         sei.lpFile = exe_wide.as_ptr();
         sei.lpParameters = if params.is_empty() {
