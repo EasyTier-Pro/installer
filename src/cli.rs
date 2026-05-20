@@ -45,22 +45,16 @@ pub struct Cli {
     pub upgrade: bool,
 
     #[arg(long, hide = true)]
-    pub upgrade_download_url: Option<String>,
-
-    #[arg(long, hide = true)]
     pub service_core_path: Option<PathBuf>,
 
     #[arg(long, hide = true)]
     pub service_config_url: Option<String>,
 
-    /// 下载源：gitee（默认）, github, github_proxy
-    #[arg(long, env = "EASYTIER_DOWNLOAD_SOURCE", default_value = "gitee")]
-    pub download_source: String,
 }
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     crate::style::debug(&format!(
-        "cli::run 开始: server={:?}, config_server={:?}, install_dir={:?}, version={:?}, status={}, uninstall={}, purge={}, debug={}, install_service={}, upgrade={}, upgrade_download_url={:?}",
+        "cli::run 开始: server={:?}, config_server={:?}, install_dir={:?}, version={:?}, status={}, uninstall={}, purge={}, debug={}, install_service={}, upgrade={}",
         cli.server,
         cli.config_server,
         cli.install_dir,
@@ -70,8 +64,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         cli.purge,
         cli.debug,
         cli.install_service,
-        cli.upgrade,
-        cli.upgrade_download_url
+        cli.upgrade
     ));
 
     if cli.status {
@@ -124,17 +117,13 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             .version
             .clone()
             .ok_or_else(|| anyhow::anyhow!("缺少升级参数 version"))?;
-        let download_url = cli
-            .upgrade_download_url
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("缺少升级参数 upgrade_download_url"))?;
         crate::style::debug(&format!(
             "进入 --upgrade 分支: install_dir={}, version={}, elevated={}",
             install_dir.display(),
             version,
             deploy::platform::is_elevated()
         ));
-        return deploy::run_upgrade(&install_dir, &version, &download_url).await;
+        return deploy::run_upgrade(&install_dir, &version).await;
     }
 
     let install_dir = cli
@@ -163,7 +152,6 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 &install_dir,
                 &release,
                 cli.version.clone(),
-                &cli.download_source,
             )
             .await;
         }
@@ -181,7 +169,6 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         cli.install_dir,
         cli.config_server,
         cli.version,
-        &cli.download_source,
     )
     .await
 }

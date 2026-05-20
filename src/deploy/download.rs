@@ -24,11 +24,62 @@ pub(crate) fn asset_name(platform: &Platform, version: &str) -> String {
     )
 }
 
+pub(crate) fn build_download_url(platform: &Platform, version: &str, source: &str) -> String {
+    let asset_name = asset_name(platform, version);
+    match source.to_lowercase().as_str() {
+        "github" => format!(
+            "https://github.com/EasyTier/EasyTier/releases/download/{}/{}",
+            version, asset_name
+        ),
+        "github_proxy" | "github-proxy" => format!(
+            "https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/download/{}/{}",
+            version, asset_name
+        ),
+        _ => format!(
+            "https://gitee.com/EasyTier/EasyTier/releases/download/{}/{}",
+            version, asset_name
+        ),
+    }
+}
+
+#[allow(dead_code)]
 pub(crate) async fn download_easytier(
     platform: &Platform,
     install_dir: &Path,
     version: &str,
     download_url: &str,
+) -> anyhow::Result<(PathBuf, PathBuf, String)> {
+    download_easytier_with_timeout(platform, install_dir, version, download_url, 300).await
+}
+
+pub(crate) async fn download_easytier_with_fallback(
+    platform: &Platform,
+    install_dir: &Path,
+    version: &str,
+) -> anyhow::Result<(PathBuf, PathBuf, String)> {
+    let sources = [("gitee", 30u64), ("github_proxy", 30u64), ("github", 60u64)];
+    let version = normalize_version(version);
+
+    for (source, timeout_secs) in &sources {
+        let url = build_download_url(platform, &version, source);
+        crate::style::info(&format!("尝试从 {} 下载...", source.bright_white()));
+        match download_easytier_with_timeout(platform, install_dir, &version, &url, *timeout_secs).await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                crate::style::warning(&format!("{} 下载失败: {}", source, e));
+            }
+        }
+    }
+
+    anyhow::bail!("所有下载源均失败，请检查网络连接或手动下载")
+}
+
+async fn download_easytier_with_timeout(
+    platform: &Platform,
+    install_dir: &Path,
+    version: &str,
+    download_url: &str,
+    timeout_secs: u64,
 ) -> anyhow::Result<(PathBuf, PathBuf, String)> {
     let version = normalize_version(version);
 
@@ -54,7 +105,7 @@ pub(crate) async fn download_easytier(
     let archive_path = cache_dir.join(&asset_name);
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
         .build()?;
 
     std::fs::create_dir_all(&cache_dir)?;

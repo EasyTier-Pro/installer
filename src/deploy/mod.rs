@@ -62,7 +62,6 @@ pub(crate) async fn run_deploy(
     install_dir: Option<PathBuf>,
     config_server_base: Option<String>,
     version_override: Option<String>,
-    download_source: &str,
 ) -> anyhow::Result<()> {
     let install_dir = install_dir.unwrap_or_else(default_install_dir);
     std::fs::create_dir_all(&install_dir)?;
@@ -142,8 +141,8 @@ pub(crate) async fn run_deploy(
     // 4. 检测平台并下载 easytier
     let platform = platform::detect_platform()?;
     let stable_version = &get_started.release_channels.stable.version;
-    let (download_version, download_url) =
-        resolve_release(stable_version, &platform, version_override, download_source)?;
+    let download_version =
+        resolve_version(stable_version, version_override)?;
     crate::style::info(&format!(
         "正在下载 easytier {} ({}-{})...",
         download_version.bright_white(),
@@ -157,7 +156,7 @@ pub(crate) async fn run_deploy(
     );
 
     let (core_path, cli_path, _installed_version) =
-        download::download_easytier(&platform, &install_dir, &download_version, &download_url)
+        download::download_easytier_with_fallback(&platform, &install_dir, &download_version)
             .await?;
     crate::style::success("下载完成");
 
@@ -202,23 +201,19 @@ pub(crate) async fn run_upgrade_from_console(
     install_dir: &Path,
     release: &LatestReleaseResponse,
     version_override: Option<String>,
-    download_source: &str,
 ) -> anyhow::Result<()> {
-    let platform = platform::detect_platform()?;
     let stable_version = &release.stable.version;
-    let (target_version, download_url) =
-        resolve_release(stable_version, &platform, version_override, download_source)?;
+    let target_version = resolve_version(stable_version, version_override)?;
     crate::style::debug(&format!(
-        "准备升级: target_version={}, download_url={}",
-        target_version, download_url
+        "准备升级: target_version={}",
+        target_version
     ));
-    run_upgrade(install_dir, &target_version, &download_url).await
+    run_upgrade(install_dir, &target_version).await
 }
 
 pub(crate) async fn run_upgrade(
     install_dir: &Path,
     target_version: &str,
-    download_url: &str,
 ) -> anyhow::Result<()> {
     let platform = platform::detect_platform()?;
     let target_version = download::normalize_version(target_version);
@@ -249,8 +244,6 @@ pub(crate) async fn run_upgrade(
             "--upgrade",
             "--version",
             &version_arg,
-            "--upgrade-download-url",
-            download_url,
         ])?;
         if status.success() {
             crate::style::success("服务已重启");
@@ -282,7 +275,7 @@ pub(crate) async fn run_upgrade(
     crate::style::success("服务已停止");
 
     let (_, cli_path, _) =
-        download::download_easytier(&platform, install_dir, &target_version, download_url).await?;
+        download::download_easytier_with_fallback(&platform, install_dir, &target_version).await?;
     crate::style::success(&format!("已下载 {}", target_version));
 
     println!();
@@ -335,42 +328,15 @@ pub(crate) async fn load_console_bootstrap(
     Ok((tenant, get_started))
 }
 
-fn resolve_release(
+fn resolve_version(
     stable_version: &str,
-    platform: &platform::Platform,
     version_override: Option<String>,
-    download_source: &str,
-) -> anyhow::Result<(String, String)> {
-    let version = if let Some(version) = version_override {
-        download::normalize_version(&version)
+) -> anyhow::Result<String> {
+    if let Some(version) = version_override {
+        Ok(download::normalize_version(&version))
     } else if !stable_version.is_empty() {
-        download::normalize_version(stable_version)
+        Ok(download::normalize_version(stable_version))
     } else {
         anyhow::bail!("Console 未返回可用版本，无法继续下载")
-    };
-
-    let download_url = build_download_url(platform, &version, download_source);
-    Ok((version, download_url))
-}
-
-fn build_download_url(
-    platform: &platform::Platform,
-    version: &str,
-    source: &str,
-) -> String {
-    let asset_name = download::asset_name(platform, version);
-    match source.to_lowercase().as_str() {
-        "github" => format!(
-            "https://github.com/EasyTier/EasyTier/releases/download/{}/{}",
-            version, asset_name
-        ),
-        "github_proxy" | "github-proxy" => format!(
-            "https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/download/{}/{}",
-            version, asset_name
-        ),
-        _ => format!(
-            "https://gitee.com/EasyTier/EasyTier/releases/download/{}/{}",
-            version, asset_name
-        ),
     }
 }
