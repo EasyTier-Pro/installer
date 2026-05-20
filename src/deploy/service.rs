@@ -224,6 +224,11 @@ pub async fn run_uninstall(install_dir: Option<PathBuf>, purge: bool) -> anyhow:
         }
         let status = super::platform::relaunch_elevated_with_args(&extra_args)?;
         if status.success() {
+            if purge {
+                crate::style::success("EasyTier 已彻底卸载并删除本地文件与缓存");
+            } else {
+                crate::style::success("EasyTier 服务已卸载，已保留本地文件和缓存");
+            }
             std::process::exit(0);
         }
         anyhow::bail!("提权后的卸载进程执行失败，请在管理员窗口中查看详细错误");

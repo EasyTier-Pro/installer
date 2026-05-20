@@ -45,6 +45,9 @@ pub struct Cli {
     pub upgrade: bool,
 
     #[arg(long, hide = true)]
+    pub upgrade_download_url: Option<String>,
+
+    #[arg(long, hide = true)]
     pub service_core_path: Option<PathBuf>,
 
     #[arg(long, hide = true)]
@@ -53,7 +56,7 @@ pub struct Cli {
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     crate::style::debug(&format!(
-        "cli::run 开始: server={:?}, config_server={:?}, install_dir={:?}, version={:?}, status={}, uninstall={}, purge={}, debug={}, install_service={}, upgrade={}",
+        "cli::run 开始: server={:?}, config_server={:?}, install_dir={:?}, version={:?}, status={}, uninstall={}, purge={}, debug={}, install_service={}, upgrade={}, upgrade_download_url={:?}",
         cli.server,
         cli.config_server,
         cli.install_dir,
@@ -63,7 +66,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         cli.purge,
         cli.debug,
         cli.install_service,
-        cli.upgrade
+        cli.upgrade,
+        cli.upgrade_download_url
     ));
 
     if cli.status {
@@ -112,13 +116,21 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             .install_dir
             .clone()
             .unwrap_or_else(deploy::default_install_dir);
+        let version = cli
+            .version
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("缺少升级参数 version"))?;
+        let download_url = cli
+            .upgrade_download_url
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("缺少升级参数 upgrade_download_url"))?;
         crate::style::debug(&format!(
-            "进入 --upgrade 分支: install_dir={}, version={:?}, elevated={}",
+            "进入 --upgrade 分支: install_dir={}, version={}, elevated={}",
             install_dir.display(),
-            cli.version,
+            version,
             deploy::platform::is_elevated()
         ));
-        return deploy::run_upgrade(&install_dir, cli.version.clone()).await;
+        return deploy::run_upgrade(&install_dir, &version, &download_url).await;
     }
 
     let install_dir = cli
@@ -137,40 +149,67 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let config = Config::new(cli.server.clone())?;
     let token_store = TokenStore::new(config.credentials_path.clone());
 
-    match deploy::check_existing_install(&install_dir, cli.version.clone()).await {
+    let mut client = ConsoleClient::new(&config.console_base_url, token_store.clone());
+
+    match deploy::check_existing_install(&install_dir).await {
         ExistingAction::Continue => {}
+        ExistingAction::UpdateRequested => {
+            client = ensure_logged_in(&config, token_store.clone(), client).await?;
+            let (tenant, get_started) = deploy::load_console_bootstrap(&client).await?;
+            return deploy::run_upgrade_from_console(
+                &install_dir,
+                &tenant.id,
+                &get_started,
+                cli.version.clone(),
+            )
+            .await;
+        }
         ExistingAction::Handled(result) => return result,
     }
 
-    let mut client = ConsoleClient::new(&config.console_base_url, token_store.clone());
-
-    if !client.is_logged_in() {
-        login::cmd_login(&config, token_store.clone()).await?;
-        client = ConsoleClient::new(&config.console_base_url, token_store.clone());
-    } else {
-        let me = client.get_me().await?;
-        let user_label = if let Some(name) = &me.user.display_name {
-            format!("{} <{}>", name, me.user.email)
-        } else {
-            me.user.email.clone()
-        };
-        crate::style::ok_kv("已登录:", &user_label);
-        if !login::confirm_continue()? {
-            token_store.clear()?;
-            println!();
-            login::cmd_login(&config, token_store.clone()).await?;
-            client = ConsoleClient::new(&config.console_base_url, token_store.clone());
-        } else {
-            println!();
-        }
-    }
+    client = ensure_logged_in(&config, token_store.clone(), client).await?;
+    let (tenant, get_started) = deploy::load_console_bootstrap(&client).await?;
 
     deploy::run_deploy(
         &config,
         &client,
+        &tenant,
+        &get_started,
         cli.install_dir,
         cli.config_server,
         cli.version,
     )
     .await
+}
+
+async fn ensure_logged_in(
+    config: &Config,
+    token_store: TokenStore,
+    mut client: ConsoleClient,
+) -> anyhow::Result<ConsoleClient> {
+    if !client.is_logged_in() {
+        login::cmd_login(config, token_store.clone()).await?;
+        return Ok(ConsoleClient::new(
+            &config.console_base_url,
+            token_store.clone(),
+        ));
+    }
+
+    let me = client.get_me().await?;
+    let user_label = if let Some(name) = &me.user.display_name {
+        format!("{} <{}>", name, me.user.email)
+    } else {
+        me.user.email.clone()
+    };
+    crate::style::ok_kv("已登录:", &user_label);
+    if !login::confirm_continue()? {
+        token_store.clear()?;
+        println!();
+        login::cmd_login(config, token_store.clone()).await?;
+        client = ConsoleClient::new(&config.console_base_url, token_store.clone());
+    } else {
+        println!();
+    }
+
+    Ok(client)
 }

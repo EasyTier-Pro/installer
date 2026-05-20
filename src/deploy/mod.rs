@@ -8,7 +8,7 @@ pub(crate) use check::{ExistingAction, check_existing_install};
 pub(crate) use platform::default_install_dir;
 pub(crate) use service::{run_status, run_uninstall};
 
-use crate::api::client::ConsoleClient;
+use crate::api::client::{ConsoleClient, GetStartedResponse, TenantSummary};
 use crate::config::Config;
 use colored::Colorize;
 use std::path::{Path, PathBuf};
@@ -57,42 +57,14 @@ pub(crate) fn check_install_dir_writable(install_dir: &Path) -> anyhow::Result<(
 pub(crate) async fn run_deploy(
     config: &Config,
     client: &ConsoleClient,
+    tenant: &TenantSummary,
+    get_started: &GetStartedResponse,
     install_dir: Option<PathBuf>,
     config_server_base: Option<String>,
     version_override: Option<String>,
 ) -> anyhow::Result<()> {
     let install_dir = install_dir.unwrap_or_else(default_install_dir);
     std::fs::create_dir_all(&install_dir)?;
-
-    // 1. 获取用户信息
-    let me = client.get_me().await?;
-    if me.tenants.is_empty() {
-        anyhow::bail!("您不属于任何工作空间，无法部署设备");
-    }
-
-    let tenant = if me.tenants.len() == 1 {
-        let t = me.tenants.into_iter().next().unwrap();
-        crate::style::ok_kv("工作空间:", &t.name);
-        t
-    } else {
-        let tenant_names: Vec<String> = me.tenants.iter().map(|t| t.name.clone()).collect();
-        let idx = key_select::read_choice(&tenant_names, "请选择要部署到的工作空间")? - 1;
-        let t = me.tenants.into_iter().nth(idx).unwrap();
-        crate::style::ok_kv("工作空间:", &t.name);
-        t
-    };
-
-    // 尝试从 Console 获取推荐的版本和 config server URL
-    let mut console_version = None;
-    let mut console_config_server = None;
-    if let Ok(gs) = client.get_started(&tenant.id).await {
-        if !gs.config_server_url.is_empty() {
-            console_config_server = Some(gs.config_server_url);
-        }
-        if !gs.release_channels.stable.version.is_empty() {
-            console_version = Some(gs.release_channels.stable.version.clone());
-        }
-    }
 
     // 2. 获取 enrollment key
     let keys = client.list_device_enrollment_keys(&tenant.id).await?;
@@ -150,7 +122,13 @@ pub(crate) async fn run_deploy(
     // 3. 构造 config server URL
     let config_server = platform::build_config_server_url(
         &config.console_base_url,
-        config_server_base.or(console_config_server),
+        config_server_base.or_else(|| {
+            if get_started.config_server_url.is_empty() {
+                None
+            } else {
+                Some(get_started.config_server_url.clone())
+            }
+        }),
     )?;
     let full_config_url = format!(
         "{}/{}",
@@ -162,14 +140,11 @@ pub(crate) async fn run_deploy(
 
     // 4. 检测平台并下载 easytier
     let platform = platform::detect_platform()?;
-
-    let download_version = version_override.or(console_version);
-    let version_label = download_version
-        .clone()
-        .unwrap_or_else(|| "latest".to_string());
+    let (download_version, download_url) =
+        resolve_console_release(get_started, &platform, version_override)?;
     crate::style::info(&format!(
         "正在下载 easytier {} ({}-{})...",
-        version_label.bright_white(),
+        download_version.bright_white(),
         platform.os,
         platform.arch
     ));
@@ -180,7 +155,8 @@ pub(crate) async fn run_deploy(
     );
 
     let (core_path, cli_path, _installed_version) =
-        download::download_easytier(&platform, &install_dir, download_version).await?;
+        download::download_easytier(&platform, &install_dir, &download_version, &download_url)
+            .await?;
     crate::style::success("下载完成");
 
     println!();
@@ -220,16 +196,29 @@ pub(crate) async fn run_deploy(
     Ok(())
 }
 
-pub(crate) async fn run_upgrade(
+pub(crate) async fn run_upgrade_from_console(
     install_dir: &Path,
+    tenant_id: &str,
+    get_started: &GetStartedResponse,
     version_override: Option<String>,
 ) -> anyhow::Result<()> {
     let platform = platform::detect_platform()?;
-    let target_version = if let Some(ref v) = version_override {
-        download::normalize_version(v)
-    } else {
-        download::fetch_latest_version().await?
-    };
+    let (target_version, download_url) =
+        resolve_console_release(get_started, &platform, version_override)?;
+    crate::style::debug(&format!(
+        "准备升级: tenant_id={}, target_version={}, download_url={}",
+        tenant_id, target_version, download_url
+    ));
+    run_upgrade(install_dir, &target_version, &download_url).await
+}
+
+pub(crate) async fn run_upgrade(
+    install_dir: &Path,
+    target_version: &str,
+    download_url: &str,
+) -> anyhow::Result<()> {
+    let platform = platform::detect_platform()?;
+    let target_version = download::normalize_version(target_version);
 
     let core_path = install_dir.join(core_binary_name());
     let current_version =
@@ -253,8 +242,13 @@ pub(crate) async fn run_upgrade(
     if !platform::is_elevated() {
         crate::style::warning("升级服务需要管理员权限，正在请求 UAC 提权...");
         let version_arg = target_version.clone();
-        let status =
-            platform::relaunch_elevated_with_args(&["--upgrade", "--version", &version_arg])?;
+        let status = platform::relaunch_elevated_with_args(&[
+            "--upgrade",
+            "--version",
+            &version_arg,
+            "--upgrade-download-url",
+            download_url,
+        ])?;
         if status.success() {
             crate::style::success("服务已重启");
             println!();
@@ -285,7 +279,7 @@ pub(crate) async fn run_upgrade(
     crate::style::success("服务已停止");
 
     let (_, cli_path, _) =
-        download::download_easytier(&platform, install_dir, Some(target_version.clone())).await?;
+        download::download_easytier(&platform, install_dir, &target_version, download_url).await?;
     crate::style::success(&format!("已下载 {}", target_version));
 
     println!();
@@ -312,4 +306,104 @@ pub(crate) async fn run_upgrade(
         target_version.bright_white()
     ));
     Ok(())
+}
+
+pub(crate) async fn load_console_bootstrap(
+    client: &ConsoleClient,
+) -> anyhow::Result<(TenantSummary, GetStartedResponse)> {
+    let me = client.get_me().await?;
+    if me.tenants.is_empty() {
+        anyhow::bail!("您不属于任何工作空间，无法部署设备");
+    }
+
+    let tenant = if me.tenants.len() == 1 {
+        let t = me.tenants.into_iter().next().unwrap();
+        crate::style::ok_kv("工作空间:", &t.name);
+        t
+    } else {
+        let tenant_names: Vec<String> = me.tenants.iter().map(|t| t.name.clone()).collect();
+        let idx = key_select::read_choice(&tenant_names, "请选择要部署到的工作空间")? - 1;
+        let t = me.tenants.into_iter().nth(idx).unwrap();
+        crate::style::ok_kv("工作空间:", &t.name);
+        t
+    };
+
+    let get_started = client.get_started(&tenant.id).await?;
+    Ok((tenant, get_started))
+}
+
+fn resolve_console_release(
+    get_started: &GetStartedResponse,
+    platform: &platform::Platform,
+    version_override: Option<String>,
+) -> anyhow::Result<(String, String)> {
+    let version = if let Some(version) = version_override {
+        download::normalize_version(&version)
+    } else if !get_started.release_channels.stable.version.is_empty() {
+        download::normalize_version(&get_started.release_channels.stable.version)
+    } else {
+        anyhow::bail!("Console 未返回可用版本，无法继续下载")
+    };
+
+    let download_url = resolve_console_download_url(&get_started.downloads, platform, &version)?;
+    Ok((version, download_url))
+}
+
+fn resolve_console_download_url(
+    downloads: &std::collections::HashMap<String, String>,
+    platform: &platform::Platform,
+    version: &str,
+) -> anyhow::Result<String> {
+    let asset_name = download::asset_name(platform, version);
+    let platform_dash = format!("{}-{}", platform.os, platform.arch);
+    let platform_underscore = format!("{}_{}", platform.os, platform.arch);
+    let version_no_prefix = version.trim_start_matches('v');
+    let candidate_keys = [
+        asset_name.as_str(),
+        platform_dash.as_str(),
+        platform_underscore.as_str(),
+    ];
+
+    for key in candidate_keys {
+        if let Some(url) = downloads.get(key)
+            && !url.trim().is_empty()
+        {
+            return Ok(url.clone());
+        }
+    }
+
+    let mut matches = downloads.iter().filter(|(key, url)| {
+        let key = key.as_str();
+        let url = url.as_str();
+        let platform_hit = key.contains(&platform_dash)
+            || key.contains(&platform_underscore)
+            || url.contains(&platform_dash)
+            || url.contains(&platform_underscore);
+        let version_hit = key.contains(version)
+            || key.contains(version_no_prefix)
+            || url.contains(version)
+            || url.contains(version_no_prefix);
+        let asset_hit = key.contains(&asset_name) || url.contains(&asset_name);
+        asset_hit || (platform_hit && version_hit)
+    });
+
+    if let Some((_, url)) = matches.next()
+        && matches.next().is_none()
+        && !url.trim().is_empty()
+    {
+        return Ok(url.clone());
+    }
+
+    let mut available_keys: Vec<String> = downloads.keys().cloned().collect();
+    available_keys.sort();
+    anyhow::bail!(
+        "Console 未返回平台 {} 对应的下载地址（目标版本 {}，可用键: {}）",
+        platform_dash,
+        version,
+        if available_keys.is_empty() {
+            "无".to_string()
+        } else {
+            available_keys.join(", ")
+        }
+    )
 }

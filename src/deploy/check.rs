@@ -4,13 +4,13 @@ use std::path::Path;
 
 pub(crate) enum ExistingAction {
     Continue,
+    UpdateRequested,
     Handled(anyhow::Result<()>),
 }
 
 /// 检测已有安装并提示用户操作。统一用于登录前和登录后两个路径。
 pub(crate) async fn check_existing_install(
     install_dir: &Path,
-    version_override: Option<String>,
 ) -> ExistingAction {
     let cli_path = match find_easytier_cli(install_dir) {
         Ok(p) => p,
@@ -44,7 +44,7 @@ pub(crate) async fn check_existing_install(
     match choice {
         0 => ExistingAction::Handled(Ok(())),
         1 => ExistingAction::Handled(do_uninstall(install_dir).await),
-        2 => ExistingAction::Handled(super::run_upgrade(install_dir, version_override).await),
+        2 => ExistingAction::UpdateRequested,
         3 => ExistingAction::Continue,
         _ => ExistingAction::Handled(Ok(())),
     }
