@@ -243,15 +243,11 @@ pub async fn run_uninstall(install_dir: Option<PathBuf>, purge: bool) -> anyhow:
     #[cfg(windows)]
     if !super::platform::is_elevated() {
         crate::style::warning("卸载服务需要管理员权限，正在请求 UAC 提权...");
-        let mut extra_args = Vec::new();
-        let current_args: Vec<String> = std::env::args().skip(1).collect();
-        if !current_args.iter().any(|arg| arg == "--uninstall") {
-            extra_args.push("--uninstall");
-        }
-        if purge && !current_args.iter().any(|arg| arg == "--purge") {
+        let mut extra_args = vec!["uninstall"];
+        if purge {
             extra_args.push("--purge");
         }
-        let status = super::platform::relaunch_elevated_with_args(&extra_args)?;
+        let status = super::platform::relaunch_elevated_with_replaced_args(&extra_args)?;
         if status.success() {
             if purge {
                 crate::style::success("EasyTier 已彻底卸载并删除本地文件与缓存");

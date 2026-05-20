@@ -26,6 +26,9 @@ irm https://raw.githubusercontent.com/EasyTier-Pro/installer/main/install.ps1 | 
 ```bash
 # 直接运行，按提示操作即可
 ./easytier-pro-installer
+
+# 等价于
+./easytier-pro-installer install
 ```
 
 典型流程：
@@ -76,14 +79,20 @@ EasyTier 已就绪: ...
 ## 其他操作
 
 ```bash
+# 更新已安装的 EasyTier
+./easytier-pro-installer update
+
+# 更新到指定版本
+./easytier-pro-installer update --version v2.6.4
+
 # 查看服务状态
-./easytier-pro-installer --status
+./easytier-pro-installer status
 
 # 卸载服务，保留已下载文件和缓存
-./easytier-pro-installer --uninstall
+./easytier-pro-installer uninstall
 
 # 彻底卸载，删除安装目录和缓存压缩包
-./easytier-pro-installer --uninstall --purge
+./easytier-pro-installer uninstall --purge
 ```
 
 ## 可选参数
@@ -93,9 +102,15 @@ EasyTier 已就绪: ...
 | `-s, --server` | `EASYTIER_CONSOLE_URL` | Console 地址，默认 `https://console.easytier.cn` |
 | `--config-server` | `EASYTIER_CONFIG_SERVER` | 覆盖 config server 地址 |
 | `-i, --install-dir` | `EASYTIER_INSTALL_DIR` | 安装目录 |
-| `-v, --version` | `EASYTIER_VERSION` | 指定 EasyTier 版本号 |
 | `--debug` | - | 开启调试日志，默认写入当前目录下的 `easytier-pro-installer.debug.log` |
-| `--purge` | - | 配合 `--uninstall` 使用，彻底删除安装目录和缓存压缩包 |
+
+子命令参数：
+
+| 子命令 | 参数 | 环境变量 | 说明 |
+|--------|------|----------|------|
+| `install` | `-v, --version` | `EASYTIER_VERSION` | 指定安装的 EasyTier 版本号 |
+| `update` | `-v, --version` | `EASYTIER_VERSION` | 指定更新到的 EasyTier 版本号 |
+| `uninstall` | `--purge` | - | 彻底删除安装目录和缓存压缩包 |
 
 ## 构建
 

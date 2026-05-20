@@ -106,11 +106,24 @@ pub(crate) fn relaunch_elevated() -> anyhow::Result<std::process::ExitStatus> {
 pub(crate) fn relaunch_elevated_with_args(
     extra_args: &[&str],
 ) -> anyhow::Result<std::process::ExitStatus> {
+    let mut args = std::env::args().skip(1).collect::<Vec<String>>();
+    args.extend(extra_args.iter().map(|s| s.to_string()));
+    relaunch_elevated_with_final_args(args)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn relaunch_elevated_with_replaced_args(
+    args: &[&str],
+) -> anyhow::Result<std::process::ExitStatus> {
+    relaunch_elevated_with_final_args(args.iter().map(|s| s.to_string()).collect())
+}
+
+fn relaunch_elevated_with_final_args(
+    args: Vec<String>,
+) -> anyhow::Result<std::process::ExitStatus> {
     #[cfg(unix)]
     {
         let exe = std::env::current_exe()?;
-        let mut args = std::env::args().skip(1).collect::<Vec<String>>();
-        args.extend(extra_args.iter().map(|s| s.to_string()));
 
         let mut cmd = std::process::Command::new("sudo");
         cmd.arg("-E").arg(&exe).args(&args);
@@ -129,6 +142,7 @@ pub(crate) fn relaunch_elevated_with_args(
         use std::os::windows::ffi::OsStrExt;
         use std::os::windows::process::ExitStatusExt;
 
+        let mut args = args;
         let exe = std::env::current_exe()?;
         crate::style::debug(&format!("Windows 提权开始: exe={}", exe.display()));
         if let Ok(cwd) = std::env::current_dir() {
@@ -140,8 +154,7 @@ pub(crate) fn relaunch_elevated_with_args(
                 local_app_data
             ));
         }
-        let mut args: Vec<String> = std::env::args().skip(1).collect();
-        crate::style::debug(&format!("Windows 提权开始: 原始参数={:?}", args));
+        crate::style::debug(&format!("Windows 提权开始: 初始参数={:?}", args));
         let has_install_dir_arg = args.iter().any(|arg| arg == "--install-dir" || arg == "-i");
         if !has_install_dir_arg {
             let install_dir = default_install_dir();
@@ -157,7 +170,6 @@ pub(crate) fn relaunch_elevated_with_args(
             crate::style::debug("Windows 提权开始: 自动追加 --debug");
             args.push("--debug".to_string());
         }
-        args.extend(extra_args.iter().map(|s| s.to_string()));
         crate::style::debug(&format!("Windows 提权开始: 最终参数={:?}", args));
 
         // 构建参数字符串（简单转义：含空格则加引号）
