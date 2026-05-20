@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "easytier-pro-installer")]
-#[command(about = "EasyTier 一键部署工具")]
+#[command(about = "EasyTier Pro 一键部署工具")]
 pub struct Cli {
     #[arg(short, long, env = "EASYTIER_CONSOLE_URL")]
     pub server: Option<String>,
