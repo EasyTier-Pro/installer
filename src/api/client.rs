@@ -233,4 +233,8 @@ impl ConsoleClient {
         )
         .await
     }
+
+    pub async fn get_latest_release(&self) -> anyhow::Result<GetStartedResponse> {
+        self.request(Method::GET, "/api/v1/releases/latest").await
+    }
 }

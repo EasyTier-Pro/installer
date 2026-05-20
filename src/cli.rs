@@ -154,11 +154,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     match deploy::check_existing_install(&install_dir).await {
         ExistingAction::Continue => {}
         ExistingAction::UpdateRequested => {
-            client = ensure_logged_in(&config, token_store.clone(), client).await?;
-            let (tenant, get_started) = deploy::load_console_bootstrap(&client).await?;
+            let get_started = client.get_latest_release().await?;
             return deploy::run_upgrade_from_console(
                 &install_dir,
-                &tenant.id,
                 &get_started,
                 cli.version.clone(),
             )

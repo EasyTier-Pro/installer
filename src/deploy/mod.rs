@@ -198,7 +198,6 @@ pub(crate) async fn run_deploy(
 
 pub(crate) async fn run_upgrade_from_console(
     install_dir: &Path,
-    tenant_id: &str,
     get_started: &GetStartedResponse,
     version_override: Option<String>,
 ) -> anyhow::Result<()> {
@@ -206,8 +205,8 @@ pub(crate) async fn run_upgrade_from_console(
     let (target_version, download_url) =
         resolve_console_release(get_started, &platform, version_override)?;
     crate::style::debug(&format!(
-        "准备升级: tenant_id={}, target_version={}, download_url={}",
-        tenant_id, target_version, download_url
+        "准备升级: target_version={}, download_url={}",
+        target_version, download_url
     ));
     run_upgrade(install_dir, &target_version, &download_url).await
 }
