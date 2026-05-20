@@ -37,11 +37,20 @@ pub struct Cli {
     /// 开启调试日志，默认写入当前目录下的 easytier-pro-installer.debug.log
     #[arg(long)]
     pub debug: bool,
+
+    #[arg(long, hide = true)]
+    pub install_service: bool,
+
+    #[arg(long, hide = true)]
+    pub service_core_path: Option<PathBuf>,
+
+    #[arg(long, hide = true)]
+    pub service_config_url: Option<String>,
 }
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     crate::style::debug(&format!(
-        "cli::run 开始: server={:?}, config_server={:?}, install_dir={:?}, version={:?}, status={}, uninstall={}, purge={}, debug={}",
+        "cli::run 开始: server={:?}, config_server={:?}, install_dir={:?}, version={:?}, status={}, uninstall={}, purge={}, debug={}, install_service={}",
         cli.server,
         cli.config_server,
         cli.install_dir,
@@ -49,10 +58,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         cli.status,
         cli.uninstall,
         cli.purge,
-        cli.debug
+        cli.debug,
+        cli.install_service
     ));
-    let config = Config::new(cli.server.clone())?;
-    let token_store = TokenStore::new(config.credentials_path.clone());
 
     if cli.status {
         return deploy::run_status(cli.install_dir).await;
@@ -72,6 +80,29 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         return deploy::run_uninstall(Some(install_dir), cli.purge).await;
     }
 
+    if cli.install_service {
+        let install_dir = cli
+            .install_dir
+            .clone()
+            .unwrap_or_else(deploy::default_install_dir);
+        let cli_path = deploy::service::find_easytier_cli(&install_dir)?;
+        let core_path = cli
+            .service_core_path
+            .clone()
+            .unwrap_or_else(|| install_dir.join(deploy::core_binary_name()));
+        let config_url = cli
+            .service_config_url
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("缺少服务安装参数 service_config_url"))?;
+        crate::style::debug(&format!(
+            "进入 --install-service 分支: install_dir={}, cli_path={}, core_path={}",
+            install_dir.display(),
+            cli_path.display(),
+            core_path.display()
+        ));
+        return deploy::service::install_service(&cli_path, &core_path, &config_url).await;
+    }
+
     let install_dir = cli
         .install_dir
         .clone()
@@ -84,6 +115,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         return Err(e);
     }
+
+    let config = Config::new(cli.server.clone())?;
+    let token_store = TokenStore::new(config.credentials_path.clone());
 
     match deploy::check_existing_install(&install_dir, cli.version.clone()).await {
         ExistingAction::Continue => {}

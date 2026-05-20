@@ -8,6 +8,78 @@ pub(crate) fn service_not_installed(output: &std::process::Output) -> bool {
     stdout.contains("Service is not installed") || stderr.contains("Service is not installed")
 }
 
+#[cfg(windows)]
+fn service_missing_in_sc(output: &std::process::Output) -> bool {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    stdout.contains("1060")
+        || stderr.contains("1060")
+        || stdout.contains("does not exist as an installed service")
+        || stderr.contains("does not exist as an installed service")
+        || stdout.contains("指定的服务未安装")
+        || stderr.contains("指定的服务未安装")
+}
+
+pub(crate) async fn service_is_installed(cli_path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        if let Ok(output) = tokio::process::Command::new("sc")
+            .args(["query", SERVICE_NAME])
+            .output()
+            .await
+        {
+            crate::style::debug(&format!("service_is_installed(sc): 退出码={:?}", output.status.code()));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stdout.trim().is_empty() {
+                crate::style::debug(&format!("service_is_installed(sc): stdout={}", stdout.trim()));
+            }
+            if !stderr.trim().is_empty() {
+                crate::style::debug(&format!("service_is_installed(sc): stderr={}", stderr.trim()));
+            }
+            if service_missing_in_sc(&output) {
+                return false;
+            }
+            if stdout.contains("SERVICE_NAME:") || output.status.success() {
+                return true;
+            }
+        }
+
+        if let Ok(output) = tokio::process::Command::new(cli_path)
+            .args(["service", "--name", SERVICE_NAME, "status"])
+            .output()
+            .await
+        {
+            crate::style::debug(&format!(
+                "service_is_installed(cli): 退出码={:?}",
+                output.status.code()
+            ));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stdout.trim().is_empty() {
+                crate::style::debug(&format!("service_is_installed(cli): stdout={}", stdout.trim()));
+            }
+            if !stderr.trim().is_empty() {
+                crate::style::debug(&format!("service_is_installed(cli): stderr={}", stderr.trim()));
+            }
+            return !service_not_installed(&output);
+        }
+
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(output) = tokio::process::Command::new(cli_path)
+            .args(["service", "--name", SERVICE_NAME, "status"])
+            .output()
+            .await
+        {
+            return !service_not_installed(&output);
+        }
+        false
+    }
+}
+
 pub(crate) async fn systemd_daemon_reload() {
     #[cfg(target_os = "linux")]
     {

@@ -185,8 +185,18 @@ pub(crate) async fn run_deploy(
     #[cfg(windows)]
     if !platform::is_elevated() {
         crate::style::warning("安装服务需要管理员权限，正在请求 UAC 提权...");
-        let status = platform::relaunch_elevated()?;
-        std::process::exit(status.code().unwrap_or(0));
+        let core_path_str = core_path.to_string_lossy().to_string();
+        let status = platform::relaunch_elevated_with_args(&[
+            "--install-service",
+            "--service-core-path",
+            &core_path_str,
+            "--service-config-url",
+            &full_config_url,
+        ])?;
+        if status.success() {
+            std::process::exit(0);
+        }
+        anyhow::bail!("提权后的安装服务进程执行失败，请在管理员窗口中查看详细错误");
     }
 
     service::install_service(&cli_path, &core_path, &full_config_url).await?;

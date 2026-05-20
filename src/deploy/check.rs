@@ -17,15 +17,8 @@ pub(crate) async fn check_existing_install(
         Err(_) => return ExistingAction::Continue,
     };
 
-    let status_output = match tokio::process::Command::new(&cli_path)
-        .args(["service", "--name", service::SERVICE_NAME, "status"])
-        .output()
-        .await
-    {
-        Ok(o) => o,
-        Err(_) => return ExistingAction::Continue,
-    };
-    if service::service_not_installed(&status_output) {
+    if !service::service_is_installed(&cli_path).await {
+        crate::style::debug("已有安装检测: 服务不存在，继续正常部署流程");
         return ExistingAction::Continue;
     }
 
