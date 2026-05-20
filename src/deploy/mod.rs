@@ -173,7 +173,11 @@ pub(crate) async fn run_deploy(
         platform.os,
         platform.arch
     ));
-    crate::style::kv("下载目录:", &install_dir.to_string_lossy());
+    crate::style::kv("安装目录:", &install_dir.to_string_lossy());
+    crate::style::kv(
+        "缓存目录:",
+        &platform::default_cache_dir().to_string_lossy(),
+    );
 
     let (core_path, cli_path, _installed_version) =
         download::download_easytier(&platform, &install_dir, download_version).await?;
@@ -194,7 +198,14 @@ pub(crate) async fn run_deploy(
             &full_config_url,
         ])?;
         if status.success() {
-            std::process::exit(0);
+            println!();
+            crate::style::success("服务已安装并启动");
+            println!();
+            crate::style::success(&format!(
+                "{} 部署完成，正在运行。",
+                "EasyTier".bright_white()
+            ));
+            return Ok(());
         }
         anyhow::bail!("提权后的安装服务进程执行失败，请在管理员窗口中查看详细错误");
     }
