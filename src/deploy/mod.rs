@@ -8,7 +8,10 @@ pub(crate) use check::{ExistingAction, check_existing_install};
 pub(crate) use platform::default_install_dir;
 pub(crate) use service::{run_status, run_uninstall};
 
-use crate::api::client::{ConsoleClient, GetStartedResponse, LatestReleaseResponse, TenantSummary};
+use crate::api::client::{
+    ConsoleClient, CreateNetworkRequest, CreateNodeRequest, DeviceSummary, GetStartedResponse,
+    LatestReleaseResponse, NetworkSummary, TenantSummary,
+};
 use crate::config::Config;
 use colored::Colorize;
 use std::path::{Path, PathBuf};
@@ -54,6 +57,225 @@ pub(crate) fn check_install_dir_writable(install_dir: &Path) -> anyhow::Result<(
     Ok(())
 }
 
+fn get_or_create_machine_id(install_dir: &Path) -> anyhow::Result<String> {
+    let path = install_dir.join(".machine-id");
+    if path.exists() {
+        let id = std::fs::read_to_string(&path)?.trim().to_string();
+        if !id.is_empty() {
+            return Ok(id);
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    std::fs::write(&path, &id)?;
+    Ok(id)
+}
+
+#[derive(Debug, Clone)]
+enum NetworkAction {
+    Keep,
+    Join(String),
+    Create,
+}
+
+async fn onboard_device(
+    client: &ConsoleClient,
+    tenant: &TenantSummary,
+    machine_id: &str,
+    recommended_region: &str,
+    console_base_url: &str,
+) -> anyhow::Result<()> {
+    println!();
+    crate::style::info("正在等待设备注册到控制台...");
+
+    let mut device_info: Option<DeviceSummary> = None;
+    let mut joined_networks: Vec<NetworkSummary> = Vec::new();
+    for attempt in 1..=6 {
+        if attempt > 1 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        match client.get_machine_status(&tenant.id, machine_id).await {
+            Ok(status) => {
+                if status.device.approval_state == "pending" {
+                    println!();
+                    crate::style::warning("设备正在等待管理员审批，审批通过后会自动加入网络");
+                    return Ok(());
+                }
+                device_info = Some(status.device);
+                joined_networks = status.networks;
+                println!();
+                break;
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("404")
+                    || msg.contains("device_not_found")
+                    || msg.contains("Not Found")
+                {
+                    print!(".");
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    crate::style::debug(&format!("第 {} 次轮询: 设备尚未注册", attempt));
+                } else {
+                    print!("x");
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    crate::style::debug(&format!("第 {} 次轮询失败: {}", attempt, msg));
+                }
+            }
+        }
+    }
+
+    let Some(device) = device_info else {
+        crate::style::warning("设备注册超时，您可以稍后通过控制台手动将设备加入网络");
+        return Ok(());
+    };
+
+    let all_networks = match client.list_networks(&tenant.id).await {
+        Ok(n) => n,
+        Err(e) => {
+            crate::style::warning(&format!("获取网络列表失败: {}", e));
+            return Ok(());
+        }
+    };
+
+    let joined_ids: std::collections::HashSet<String> =
+        joined_networks.iter().map(|n| n.id.clone()).collect();
+
+    let mut options: Vec<String> = Vec::new();
+    let mut actions: Vec<NetworkAction> = Vec::new();
+
+    if !joined_networks.is_empty() {
+        let names = joined_networks
+            .iter()
+            .map(|n| {
+                if let Some(ip) = &n.node_ipv4 {
+                    format!("{} ({}, 设备IP: {})", n.name, n.ipv4_cidr, ip)
+                } else {
+                    format!("{} ({})", n.name, n.ipv4_cidr)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        options.push(format!("[保持当前配置]（已加入：{}）", names));
+        actions.push(NetworkAction::Keep);
+    }
+
+    for net in &all_networks {
+        if !joined_ids.contains(&net.id) {
+            options.push(format!("{} ({})", net.name, net.ipv4_cidr));
+            actions.push(NetworkAction::Join(net.id.clone()));
+        }
+    }
+
+    options.push("[创建新网络]".to_string());
+    actions.push(NetworkAction::Create);
+
+    let choice = dialoguer::Select::with_theme(&crate::style::dialoguer_theme())
+        .with_prompt("请选择操作")
+        .items(&options)
+        .default(0)
+        .interact()?;
+
+    let (network_id, network_name) = match &actions[choice] {
+        NetworkAction::Keep => {
+            crate::style::success("配置保持不变");
+            if let Ok(status) = client.get_machine_status(&tenant.id, machine_id).await
+                && let Some(net) = status.networks.first()
+            {
+                let nodes = client
+                    .get_network_nodes(&tenant.id, &net.id)
+                    .await
+                    .unwrap_or_default();
+                println!();
+                crate::style::info("设备配置如下：");
+                println!("  {} {}", "已加入网络:".bold(), &net.name);
+                if let Some(ip) = &net.node_ipv4 {
+                    println!("  {} {}", "虚拟 IP:".bold(), ip);
+                }
+                println!("  {} {}", "网络网段:".bold(), &net.ipv4_cidr);
+                println!("  {} {}台", "网络节点:".bold(), nodes.len());
+                println!("  {} {}", "控制台地址:".bold(), console_base_url);
+            }
+            return Ok(());
+        }
+        NetworkAction::Join(network_id) => {
+            let node_req = CreateNodeRequest {
+                device_id: device.id,
+            };
+            if let Err(e) = client.create_node(&tenant.id, network_id, &node_req).await {
+                crate::style::warning(&format!("将设备加入网络失败: {}", e));
+                return Ok(());
+            }
+            let net_name = all_networks
+                .iter()
+                .find(|n| n.id == *network_id)
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| "网络".to_string());
+            crate::style::success(&format!("设备已加入网络 {}", net_name));
+            (network_id.clone(), net_name)
+        }
+        NetworkAction::Create => {
+            let name = dialoguer::Input::with_theme(&crate::style::dialoguer_theme())
+                .with_prompt("请输入新网络名称")
+                .interact()?;
+
+            let regions = if recommended_region.is_empty() {
+                if let Some(first_net) = all_networks.first() {
+                    first_net.regions.clone()
+                } else {
+                    crate::style::warning("平台未就绪，无法创建网络");
+                    return Ok(());
+                }
+            } else {
+                vec![recommended_region.to_string()]
+            };
+
+            let req = CreateNetworkRequest {
+                name,
+                regions,
+                ipv4_cidr: None,
+                relay_traffic_quota_bytes: None,
+            };
+            let net = match client.create_network(&tenant.id, &req).await {
+                Ok(n) => n,
+                Err(e) => {
+                    crate::style::warning(&format!("创建网络失败: {}", e));
+                    return Ok(());
+                }
+            };
+            let node_req = CreateNodeRequest {
+                device_id: device.id,
+            };
+            if let Err(e) = client.create_node(&tenant.id, &net.id, &node_req).await {
+                crate::style::warning(&format!("将设备加入网络失败: {}", e));
+                return Ok(());
+            }
+            crate::style::success(&format!("已创建网络 {} 并将设备加入其中", net.name));
+            (net.id.clone(), net.name.clone())
+        }
+    };
+
+    // 等待状态同步后输出汇总信息
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    if let Ok(status) = client.get_machine_status(&tenant.id, machine_id).await
+        && let Some(net) = status.networks.iter().find(|n| n.id == network_id)
+    {
+        let nodes = client
+            .get_network_nodes(&tenant.id, &network_id)
+            .await
+            .unwrap_or_default();
+        println!();
+        crate::style::info("设备已成功配置：");
+        println!("  {} {}", "网络名称:".bold(), network_name);
+        if let Some(ip) = &net.node_ipv4 {
+            println!("  {} {}", "虚拟 IP:".bold(), ip);
+        }
+        println!("  {} {}", "网络网段:".bold(), &net.ipv4_cidr);
+        println!("  {} {}台", "网络节点:".bold(), nodes.len());
+        println!("  {} {}", "控制台地址:".bold(), console_base_url);
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn run_deploy(
     config: &Config,
     client: &ConsoleClient,
@@ -65,6 +287,9 @@ pub(crate) async fn run_deploy(
 ) -> anyhow::Result<()> {
     let install_dir = install_dir.unwrap_or_else(default_install_dir);
     std::fs::create_dir_all(&install_dir)?;
+
+    let machine_id = get_or_create_machine_id(&install_dir)?;
+    crate::style::debug(&format!("machine_id: {}", machine_id));
 
     // 2. 获取 enrollment key
     let keys = client.list_device_enrollment_keys(&tenant.id).await?;
@@ -141,8 +366,7 @@ pub(crate) async fn run_deploy(
     // 4. 检测平台并下载 easytier
     let platform = platform::detect_platform()?;
     let stable_version = &get_started.release_channels.stable.version;
-    let download_version =
-        resolve_version(stable_version, version_override)?;
+    let download_version = resolve_version(stable_version, version_override)?;
     crate::style::info(&format!(
         "正在下载 easytier {} ({}-{})...",
         download_version.bright_white(),
@@ -167,33 +391,47 @@ pub(crate) async fn run_deploy(
     if !platform::is_elevated() {
         crate::style::warning("安装服务需要管理员权限，正在请求 UAC 提权...");
         let core_path_str = core_path.to_string_lossy().to_string();
-        let status = platform::relaunch_elevated_with_args(&[
+        let mut extra_args = vec![
             "--install-service",
             "--service-core-path",
             &core_path_str,
             "--service-config-url",
             &full_config_url,
-        ])?;
-        if status.success() {
-            println!();
-            crate::style::success("服务已安装并启动");
-            println!();
-            crate::style::success(&format!(
-                "{} 部署完成，正在运行。",
-                "EasyTier".bright_white()
-            ));
-            return Ok(());
+        ];
+        if !machine_id.is_empty() {
+            extra_args.push("--service-machine-id");
+            extra_args.push(&machine_id);
         }
-        anyhow::bail!("提权后的安装服务进程执行失败，请在管理员窗口中查看详细错误");
+        let status = platform::relaunch_elevated_with_args(&extra_args)?;
+        if !status.success() {
+            anyhow::bail!("提权后的安装服务进程执行失败，请在管理员窗口中查看详细错误");
+        }
+    } else {
+        service::install_service(&cli_path, &core_path, &full_config_url, Some(&machine_id))
+            .await?;
     }
 
-    service::install_service(&cli_path, &core_path, &full_config_url).await?;
+    #[cfg(not(windows))]
+    {
+        service::install_service(&cli_path, &core_path, &full_config_url, Some(&machine_id))
+            .await?;
+    }
 
     println!();
     crate::style::success(&format!(
         "{} 部署完成，正在运行。",
         "EasyTier".bright_white()
     ));
+
+    onboard_device(
+        client,
+        tenant,
+        &machine_id,
+        &get_started.recommended_region,
+        &config.console_base_url,
+    )
+    .await?;
+
     Ok(())
 }
 
@@ -204,17 +442,11 @@ pub(crate) async fn run_upgrade_from_console(
 ) -> anyhow::Result<()> {
     let stable_version = &release.stable.version;
     let target_version = resolve_version(stable_version, version_override)?;
-    crate::style::debug(&format!(
-        "准备升级: target_version={}",
-        target_version
-    ));
+    crate::style::debug(&format!("准备升级: target_version={}", target_version));
     run_upgrade(install_dir, &target_version).await
 }
 
-pub(crate) async fn run_upgrade(
-    install_dir: &Path,
-    target_version: &str,
-) -> anyhow::Result<()> {
+pub(crate) async fn run_upgrade(install_dir: &Path, target_version: &str) -> anyhow::Result<()> {
     let platform = platform::detect_platform()?;
     let target_version = download::normalize_version(target_version);
 
@@ -240,11 +472,8 @@ pub(crate) async fn run_upgrade(
     if !platform::is_elevated() {
         crate::style::warning("升级服务需要管理员权限，正在请求 UAC 提权...");
         let version_arg = target_version.clone();
-        let status = platform::relaunch_elevated_with_args(&[
-            "--upgrade",
-            "--version",
-            &version_arg,
-        ])?;
+        let status =
+            platform::relaunch_elevated_with_args(&["--upgrade", "--version", &version_arg])?;
         if status.success() {
             crate::style::success("服务已重启");
             println!();

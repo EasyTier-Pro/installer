@@ -63,7 +63,15 @@ pub(crate) async fn download_easytier_with_fallback(
     for (source, connect_timeout_secs) in &sources {
         let url = build_download_url(platform, &version, source);
         crate::style::info(&format!("尝试从 {} 下载...", source.bright_white()));
-        match download_easytier_with_timeout(platform, install_dir, &version, &url, *connect_timeout_secs).await {
+        match download_easytier_with_timeout(
+            platform,
+            install_dir,
+            &version,
+            &url,
+            *connect_timeout_secs,
+        )
+        .await
+        {
             Ok(result) => return Ok(result),
             Err(e) => {
                 crate::style::warning(&format!("{} 不可用: {}", source, e));
@@ -213,7 +221,11 @@ fn extract_zip(data: &[u8], dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn find_package_root(extract_dir: &Path, core_name: &str, cli_name: &str) -> anyhow::Result<Option<PathBuf>> {
+fn find_package_root(
+    extract_dir: &Path,
+    core_name: &str,
+    cli_name: &str,
+) -> anyhow::Result<Option<PathBuf>> {
     if extract_dir.join(core_name).exists() && extract_dir.join(cli_name).exists() {
         return Ok(Some(extract_dir.to_path_buf()));
     }

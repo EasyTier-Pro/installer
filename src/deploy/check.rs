@@ -9,9 +9,7 @@ pub(crate) enum ExistingAction {
 }
 
 /// 检测已有安装并提示用户操作。统一用于登录前和登录后两个路径。
-pub(crate) async fn check_existing_install(
-    install_dir: &Path,
-) -> ExistingAction {
+pub(crate) async fn check_existing_install(install_dir: &Path) -> ExistingAction {
     let cli_path = match find_easytier_cli(install_dir) {
         Ok(p) => p,
         Err(_) => return ExistingAction::Continue,

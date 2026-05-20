@@ -103,7 +103,9 @@ pub(crate) fn relaunch_elevated() -> anyhow::Result<std::process::ExitStatus> {
     relaunch_elevated_with_args(&[])
 }
 
-pub(crate) fn relaunch_elevated_with_args(extra_args: &[&str]) -> anyhow::Result<std::process::ExitStatus> {
+pub(crate) fn relaunch_elevated_with_args(
+    extra_args: &[&str],
+) -> anyhow::Result<std::process::ExitStatus> {
     #[cfg(unix)]
     {
         let exe = std::env::current_exe()?;
@@ -133,13 +135,14 @@ pub(crate) fn relaunch_elevated_with_args(extra_args: &[&str]) -> anyhow::Result
             crate::style::debug(&format!("Windows 提权开始: cwd={}", cwd.display()));
         }
         if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-            crate::style::debug(&format!("Windows 提权开始: LOCALAPPDATA={}", local_app_data));
+            crate::style::debug(&format!(
+                "Windows 提权开始: LOCALAPPDATA={}",
+                local_app_data
+            ));
         }
         let mut args: Vec<String> = std::env::args().skip(1).collect();
         crate::style::debug(&format!("Windows 提权开始: 原始参数={:?}", args));
-        let has_install_dir_arg = args
-            .iter()
-            .any(|arg| arg == "--install-dir" || arg == "-i");
+        let has_install_dir_arg = args.iter().any(|arg| arg == "--install-dir" || arg == "-i");
         if !has_install_dir_arg {
             let install_dir = default_install_dir();
             crate::style::debug(&format!(
@@ -173,14 +176,17 @@ pub(crate) fn relaunch_elevated_with_args(extra_args: &[&str]) -> anyhow::Result
         }
         crate::style::debug(&format!("Windows 提权开始: 参数字符串={}", params));
 
-        let exe_wide: Vec<u16> =
-            std::ffi::OsStr::new(&exe).encode_wide().chain(Some(0)).collect();
+        let exe_wide: Vec<u16> = std::ffi::OsStr::new(&exe)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
         let param_wide: Vec<u16> = params.encode_utf16().chain(Some(0)).collect();
         let verb_wide: Vec<u16> = "runas".encode_utf16().chain(Some(0)).collect();
         let cwd = std::env::current_dir()?;
         let cwd_wide: Vec<u16> = cwd.as_os_str().encode_wide().chain(Some(0)).collect();
 
-        let mut sei = unsafe { std::mem::zeroed::<windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW>() };
+        let mut sei =
+            unsafe { std::mem::zeroed::<windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW>() };
         sei.cbSize = std::mem::size_of::<windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW>() as u32;
         sei.fMask = windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS;
         sei.hwnd = std::ptr::null_mut();
@@ -212,7 +218,10 @@ pub(crate) fn relaunch_elevated_with_args(extra_args: &[&str]) -> anyhow::Result
             );
 
             let mut exit_code: u32 = 0;
-            if windows_sys::Win32::System::Threading::GetExitCodeProcess(sei.hProcess, &mut exit_code) == 0
+            if windows_sys::Win32::System::Threading::GetExitCodeProcess(
+                sei.hProcess,
+                &mut exit_code,
+            ) == 0
             {
                 windows_sys::Win32::Foundation::CloseHandle(sei.hProcess);
                 anyhow::bail!("无法获取提升后进程的退出码");

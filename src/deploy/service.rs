@@ -8,6 +8,12 @@ pub(crate) fn service_not_installed(output: &std::process::Output) -> bool {
     stdout.contains("Service is not installed") || stderr.contains("Service is not installed")
 }
 
+pub(crate) fn service_stopped_after_uninstall(output: &std::process::Output) -> bool {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    stdout.contains("Service is stopped") || stderr.contains("Service is stopped")
+}
+
 #[cfg(windows)]
 fn service_missing_in_sc(output: &std::process::Output) -> bool {
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -28,14 +34,23 @@ pub(crate) async fn service_is_installed(cli_path: &Path) -> bool {
             .output()
             .await
         {
-            crate::style::debug(&format!("service_is_installed(sc): 退出码={:?}", output.status.code()));
+            crate::style::debug(&format!(
+                "service_is_installed(sc): 退出码={:?}",
+                output.status.code()
+            ));
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             if !stdout.trim().is_empty() {
-                crate::style::debug(&format!("service_is_installed(sc): stdout={}", stdout.trim()));
+                crate::style::debug(&format!(
+                    "service_is_installed(sc): stdout={}",
+                    stdout.trim()
+                ));
             }
             if !stderr.trim().is_empty() {
-                crate::style::debug(&format!("service_is_installed(sc): stderr={}", stderr.trim()));
+                crate::style::debug(&format!(
+                    "service_is_installed(sc): stderr={}",
+                    stderr.trim()
+                ));
             }
             if service_missing_in_sc(&output) {
                 return false;
@@ -57,10 +72,16 @@ pub(crate) async fn service_is_installed(cli_path: &Path) -> bool {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             if !stdout.trim().is_empty() {
-                crate::style::debug(&format!("service_is_installed(cli): stdout={}", stdout.trim()));
+                crate::style::debug(&format!(
+                    "service_is_installed(cli): stdout={}",
+                    stdout.trim()
+                ));
             }
             if !stderr.trim().is_empty() {
-                crate::style::debug(&format!("service_is_installed(cli): stderr={}", stderr.trim()));
+                crate::style::debug(&format!(
+                    "service_is_installed(cli): stderr={}",
+                    stderr.trim()
+                ));
             }
             return !service_not_installed(&output);
         }
@@ -94,22 +115,22 @@ pub(crate) async fn install_service(
     cli_path: &Path,
     core_path: &Path,
     config_url: &str,
+    machine_id: Option<&str>,
 ) -> anyhow::Result<()> {
     if let Ok(status) = tokio::process::Command::new(cli_path)
         .args(["service", "--name", SERVICE_NAME, "status"])
         .output()
         .await
+        && !service_not_installed(&status)
     {
-        if !service_not_installed(&status) {
-            let _ = tokio::process::Command::new(cli_path)
-                .args(["service", "--name", SERVICE_NAME, "uninstall"])
-                .output()
-                .await;
-            systemd_daemon_reload().await;
-        }
+        let _ = tokio::process::Command::new(cli_path)
+            .args(["service", "--name", SERVICE_NAME, "uninstall"])
+            .output()
+            .await;
+        systemd_daemon_reload().await;
     }
 
-    let args = vec![
+    let mut args = vec![
         "service".to_string(),
         "--name".to_string(),
         SERVICE_NAME.to_string(),
@@ -121,6 +142,10 @@ pub(crate) async fn install_service(
         config_url.to_string(),
         "--secure-mode=true".to_string(),
     ];
+    if let Some(mid) = machine_id {
+        args.push("--machine-id".to_string());
+        args.push(mid.to_string());
+    }
 
     let output = tokio::process::Command::new(cli_path)
         .args(&args)
@@ -319,6 +344,10 @@ pub(crate) async fn uninstall_service(cli_path: &Path) -> anyhow::Result<()> {
             crate::style::debug("uninstall 返回 Service is not installed，按卸载成功处理");
             return Ok(());
         }
+        if service_stopped_after_uninstall(&output) {
+            crate::style::debug("uninstall 返回 Service is stopped，按卸载成功处理");
+            return Ok(());
+        }
         if !stderr.trim().is_empty() {
             crate::style::debug(&format!("uninstall stderr={}", stderr.trim()));
             eprintln!("{}", stderr.trim());
@@ -342,6 +371,8 @@ pub(crate) async fn uninstall_service(cli_path: &Path) -> anyhow::Result<()> {
         }
         if service_not_installed(&v) {
             crate::style::debug("verify 返回 Service is not installed，服务已卸载");
+        } else if service_stopped_after_uninstall(&v) {
+            crate::style::debug("verify 返回 Service is stopped，服务已卸载");
         } else {
             crate::style::warning("卸载未生效，服务仍然存在");
             anyhow::bail!("卸载未生效，请手动检查 easytier 进程");

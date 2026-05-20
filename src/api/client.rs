@@ -84,6 +84,9 @@ pub struct GetStartedResponse {
     pub downloads: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub release_channels: GetStartedReleaseChannels,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub recommended_region: String,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -120,6 +123,90 @@ pub struct GetStartedReleaseChannel {
     #[serde(default)]
     #[allow(dead_code)]
     pub configured: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)]
+pub struct DeviceSummary {
+    pub id: String,
+    #[serde(default)]
+    pub hostname: String,
+    #[serde(default)]
+    pub approval_state: String,
+    #[serde(default)]
+    pub connectivity_state: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)]
+pub struct NetworkSummary {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub ipv4_cidr: String,
+    #[serde(default)]
+    pub node_ipv4: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)]
+pub struct MachineStatusResponse {
+    pub device: DeviceSummary,
+    #[serde(default)]
+    pub networks: Vec<NetworkSummary>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)]
+pub struct Network {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub network_name: String,
+    #[serde(default)]
+    pub ipv4_cidr: String,
+    #[serde(default)]
+    pub regions: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CreateNetworkRequest {
+    pub name: String,
+    pub regions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ipv4_cidr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_traffic_quota_bytes: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CreateNodeRequest {
+    pub device_id: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)]
+pub struct NodeOperationResult {
+    #[serde(default)]
+    pub node: Option<NetworkNode>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)]
+pub struct NetworkNode {
+    pub id: String,
+    #[serde(default)]
+    pub ipv4_addr: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)]
+pub struct Node {
+    pub id: String,
+    #[serde(default)]
+    pub ipv4_addr: Option<String>,
 }
 
 pub struct ConsoleClient {
@@ -172,6 +259,11 @@ impl ConsoleClient {
         path: &str,
         body: &B,
     ) -> anyhow::Result<T> {
+        if crate::style::debug_enabled()
+            && let Ok(json) = serde_json::to_string(body)
+        {
+            crate::style::debug(&format!("API 请求 body: {}", json));
+        }
         self.send(method, path, |req| req.json(body)).await
     }
 
@@ -182,20 +274,22 @@ impl ConsoleClient {
         configure: impl FnOnce(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
     ) -> anyhow::Result<T> {
         let access_token = self.load_valid_token()?;
-        let resp = configure(
-            self.client
-                .request(method, format!("{}{}", self.base_url, path))
-                .bearer_auth(&access_token),
-        )
-        .send()
-        .await?;
+        let url = format!("{}{}", self.base_url, path);
+        crate::style::debug(&format!("API 请求: {} {}", method, url));
 
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
+        let resp = configure(self.client.request(method, &url).bearer_auth(&access_token))
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        crate::style::debug(&format!("API 响应 [{}]: {}", status, text));
+
+        if !status.is_success() {
             anyhow::bail!("请求失败: {}", text)
         }
 
-        Ok(resp.json().await?)
+        Ok(serde_json::from_str(&text)?)
     }
 
     pub async fn get_me(&self) -> anyhow::Result<MeResponse> {
@@ -251,5 +345,70 @@ impl ConsoleClient {
 
     pub async fn get_latest_release(&self) -> anyhow::Result<LatestReleaseResponse> {
         self.request(Method::GET, "/api/v1/releases/latest").await
+    }
+
+    pub async fn get_machine_status(
+        &self,
+        tenant_id: &str,
+        machine_id: &str,
+    ) -> anyhow::Result<MachineStatusResponse> {
+        self.request(
+            Method::GET,
+            &format!("/api/v1/tenants/{}/machines/{}", tenant_id, machine_id),
+        )
+        .await
+    }
+
+    pub async fn list_networks(&self, tenant_id: &str) -> anyhow::Result<Vec<Network>> {
+        self.request(
+            Method::GET,
+            &format!("/api/v1/tenants/{}/networks", tenant_id),
+        )
+        .await
+    }
+
+    pub async fn create_network(
+        &self,
+        tenant_id: &str,
+        req: &CreateNetworkRequest,
+    ) -> anyhow::Result<Network> {
+        self.request_with_body(
+            Method::POST,
+            &format!("/api/v1/tenants/{}/networks", tenant_id),
+            req,
+        )
+        .await
+    }
+
+    pub async fn create_node(
+        &self,
+        tenant_id: &str,
+        network_id: &str,
+        req: &CreateNodeRequest,
+    ) -> anyhow::Result<NodeOperationResult> {
+        self.request_with_body(
+            Method::POST,
+            &format!(
+                "/api/v1/tenants/{}/networks/{}/nodes",
+                tenant_id, network_id
+            ),
+            req,
+        )
+        .await
+    }
+
+    pub async fn get_network_nodes(
+        &self,
+        tenant_id: &str,
+        network_id: &str,
+    ) -> anyhow::Result<Vec<Node>> {
+        self.request(
+            Method::GET,
+            &format!(
+                "/api/v1/tenants/{}/networks/{}/nodes",
+                tenant_id, network_id
+            ),
+        )
+        .await
     }
 }

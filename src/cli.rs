@@ -50,6 +50,8 @@ pub struct Cli {
     #[arg(long, hide = true)]
     pub service_config_url: Option<String>,
 
+    #[arg(long, hide = true)]
+    pub service_machine_id: Option<String>,
 }
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
@@ -105,7 +107,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             cli_path.display(),
             core_path.display()
         ));
-        return deploy::service::install_service(&cli_path, &core_path, &config_url).await;
+        let machine_id = cli.service_machine_id.as_deref();
+        return deploy::service::install_service(&cli_path, &core_path, &config_url, machine_id)
+            .await;
     }
 
     if cli.upgrade {
@@ -148,12 +152,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         ExistingAction::Continue => {}
         ExistingAction::UpdateRequested => {
             let release = client.get_latest_release().await?;
-            return deploy::run_upgrade_from_console(
-                &install_dir,
-                &release,
-                cli.version.clone(),
-            )
-            .await;
+            return deploy::run_upgrade_from_console(&install_dir, &release, cli.version.clone())
+                .await;
         }
         ExistingAction::Handled(result) => return result,
     }
