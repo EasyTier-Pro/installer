@@ -254,13 +254,55 @@ fn relaunch_elevated_with_final_args(
 pub(crate) fn build_config_server_url(
     console_url: &str,
     override_base: Option<String>,
+    console_config_server_url: &str,
 ) -> anyhow::Result<String> {
     if let Some(base) = override_base {
         return Ok(base);
+    }
+    let base = console_config_server_url.trim();
+    if !base.is_empty() {
+        return Ok(base.to_string());
     }
     let url = console_url.parse::<reqwest::Url>()?;
     let host = url
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("无法解析 Console 地址"))?;
     Ok(format!("tcp://{}:22020", host))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uses_console_config_server_url_before_fallback() {
+        let url = build_config_server_url(
+            "https://api.console.easytier.net",
+            None,
+            "tcp://et-web.console.easytier.net:22020",
+        )
+        .expect("config server url");
+
+        assert_eq!(url, "tcp://et-web.console.easytier.net:22020");
+    }
+
+    #[test]
+    fn explicit_config_server_override_wins() {
+        let url = build_config_server_url(
+            "https://api.console.easytier.net",
+            Some("tcp://custom.example:22020".to_string()),
+            "tcp://et-web.console.easytier.net:22020",
+        )
+        .expect("config server url");
+
+        assert_eq!(url, "tcp://custom.example:22020");
+    }
+
+    #[test]
+    fn falls_back_to_console_host_when_api_has_no_config_server_url() {
+        let url = build_config_server_url("https://api.console.easytier.net", None, "")
+            .expect("config server url");
+
+        assert_eq!(url, "tcp://api.console.easytier.net:22020");
+    }
 }

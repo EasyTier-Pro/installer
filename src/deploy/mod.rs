@@ -315,9 +315,26 @@ pub(crate) async fn run_deploy(
         let name = key_select::key_name(&key).to_string();
         let label = key_select::key_type_label(key.reusable);
         if key_select::confirm_yes(&format!("是否使用{}密钥 {} 进行部署", label, name))? {
-            let token = key_select::get_key_token(client, &tenant.id, &key).await?;
-            crate::style::ok_kv("注册密钥:", &format!("{} [{}]", name, label));
-            token
+            match key_select::get_key_token(client, &tenant.id, &key).await {
+                Ok(token) => {
+                    crate::style::ok_kv("注册密钥:", &format!("{} [{}]", name, label));
+                    token
+                }
+                Err(err) if key_select::is_key_secret_unavailable(&err) => {
+                    crate::style::warning(&format!(
+                        "密钥 {} 当前无法用于部署，请创建新密钥。",
+                        name
+                    ));
+                    let (key, token) = key_select::create_new_key(client, &tenant.id).await?;
+                    let new_label = key_select::key_type_label(key.reusable);
+                    crate::style::ok_kv(
+                        "注册密钥:",
+                        &format!("{} [{}]", key_select::key_name(&key), new_label),
+                    );
+                    token
+                }
+                Err(err) => return Err(err),
+            }
         } else {
             let (key, token) = key_select::create_new_key(client, &tenant.id).await?;
             let new_label = key_select::key_type_label(key.reusable);
@@ -345,8 +362,11 @@ pub(crate) async fn run_deploy(
     };
 
     // 3. 构造 config server URL
-    let config_server =
-        platform::build_config_server_url(&config.console_base_url, config_server_base)?;
+    let config_server = platform::build_config_server_url(
+        &config.console_base_url,
+        config_server_base,
+        &latest_release.web_config_server_url,
+    )?;
     let full_config_url = format!(
         "{}/{}",
         config_server.trim_end_matches('/'),

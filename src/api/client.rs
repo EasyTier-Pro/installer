@@ -79,6 +79,8 @@ pub struct LatestReleaseResponse {
     #[serde(default)]
     #[allow(dead_code)]
     pub testing: ReleaseChannelInfo,
+    #[serde(default)]
+    pub web_config_server_url: String,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]

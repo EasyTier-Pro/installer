@@ -36,7 +36,7 @@ pub(crate) async fn get_key_token(
         .bootstrap_token)
 }
 
-fn is_key_secret_unavailable(err: &anyhow::Error) -> bool {
+pub(crate) fn is_key_secret_unavailable(err: &anyhow::Error) -> bool {
     let text = err.to_string();
     text.contains("device_enrollment_key_secret_unavailable")
         || text.contains("key secret unavailable")
