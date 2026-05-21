@@ -1,7 +1,13 @@
 #!/bin/bash
 set -e
 
-REPO="EasyTier-Pro/installer"
+GITHUB_REPO="EasyTier-Pro/installer"
+GITEE_REPO="easytier/easytier-pro-installer"
+
+# 优先从 gitee 下载，失败回退到 github
+RELEASE_API_BASE="https://gitee.com/api/v5/repos"
+RELEASE_DOWNLOAD_BASE="https://gitee.com"
+REPO="$GITEE_REPO"
 
 # 检测 OS
 detect_os() {
@@ -65,10 +71,17 @@ download_cmd() {
 
 # 获取最新版本
 echo "正在查询最新版本..."
-LATEST=$(download_cmd "https://api.github.com/repos/$REPO/releases/latest" /dev/stdout | grep '"tag_name":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+LATEST=$(download_cmd "$RELEASE_API_BASE/$REPO/releases/latest" /dev/stdout | grep '"tag_name":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
 if [ -z "$LATEST" ]; then
-    echo "错误：无法获取最新版本信息"
-    exit 1
+    echo "gitee 获取失败，尝试 github..."
+    RELEASE_API_BASE="https://api.github.com/repos"
+    RELEASE_DOWNLOAD_BASE="https://github.com"
+    REPO="$GITHUB_REPO"
+    LATEST=$(download_cmd "$RELEASE_API_BASE/$REPO/releases/latest" /dev/stdout | grep '"tag_name":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+    if [ -z "$LATEST" ]; then
+        echo "错误：无法获取最新版本信息"
+        exit 1
+    fi
 fi
 
 # 确定文件名
@@ -80,7 +93,7 @@ else
     BIN_NAME="easytier-pro-installer"
 fi
 
-URL="https://github.com/$REPO/releases/download/$LATEST/$ASSET"
+URL="$RELEASE_DOWNLOAD_BASE/$REPO/releases/download/$LATEST/$ASSET"
 
 # 安装目录
 INSTALL_DIR="${INSTALL_DIR:-.}"

@@ -6,7 +6,13 @@ param(
     [string[]]$InstallerArgs
 )
 
-$Repo = "EasyTier-Pro/installer"
+$GithubRepo = "EasyTier-Pro/installer"
+$GiteeRepo = "easytier/easytier-pro-installer"
+
+# 优先从 gitee 下载，失败回退到 github
+$ReleaseApiBase = "https://gitee.com/api/v5/repos"
+$ReleaseDownloadBase = "https://gitee.com"
+$Repo = $GiteeRepo
 
 # 检测架构
 switch ($env:PROCESSOR_ARCHITECTURE) {
@@ -24,15 +30,24 @@ $OS = "windows"
 # 获取最新版本
 Write-Host "正在查询最新版本..."
 try {
-    $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing
+    $Release = Invoke-RestMethod -Uri "$ReleaseApiBase/$Repo/releases/latest" -UseBasicParsing
     $Version = $Release.tag_name
 } catch {
-    Write-Error "错误：无法获取最新版本信息: $_"
-    exit 1
+    Write-Host "gitee 获取失败，尝试 github..."
+    $ReleaseApiBase = "https://api.github.com/repos"
+    $ReleaseDownloadBase = "https://github.com"
+    $Repo = $GithubRepo
+    try {
+        $Release = Invoke-RestMethod -Uri "$ReleaseApiBase/$Repo/releases/latest" -UseBasicParsing
+        $Version = $Release.tag_name
+    } catch {
+        Write-Error "错误：无法获取最新版本信息: $_"
+        exit 1
+    }
 }
 
 $Asset = "easytier-pro-installer-${OS}-${Arch}.exe"
-$Url = "https://github.com/$Repo/releases/download/$Version/$Asset"
+$Url = "$ReleaseDownloadBase/$Repo/releases/download/$Version/$Asset"
 
 # 安装目录
 $InstallPath = Resolve-Path $InstallDir -ErrorAction SilentlyContinue
