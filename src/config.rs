@@ -19,7 +19,8 @@ impl Config {
         } else if let Ok(env) = std::env::var("EASYTIER_CONSOLE_URL") {
             env
         } else {
-            Self::read_config_file().unwrap_or_else(|| "https://console.easytier.cn".to_string())
+            Self::read_config_file()
+                .unwrap_or_else(|| "https://api.console.easytier.net".to_string())
         };
 
         let dirs = ProjectDirs::from("cn", "easytier", "console")
