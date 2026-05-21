@@ -99,7 +99,7 @@ EasyTier 已就绪: ...
 
 | 参数 | 环境变量 | 说明 |
 |------|----------|------|
-| `-s, --server` | `EASYTIER_CONSOLE_URL` | Console 地址，默认 `https://console.easytier.cn` |
+| `-s, --server` | `EASYTIER_CONSOLE_URL` | Console 地址，默认 `https://api.console.easytier.net` |
 | `--config-server` | `EASYTIER_CONFIG_SERVER` | 覆盖 config server 地址 |
 | `-i, --install-dir` | `EASYTIER_INSTALL_DIR` | 安装目录 |
 | `--debug` | - | 开启调试日志，默认写入当前目录下的 `easytier-pro-installer.debug.log` |

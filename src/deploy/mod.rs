@@ -264,6 +264,7 @@ async fn onboard_device(
             .unwrap_or_default();
         println!();
         crate::style::info("设备已成功配置：");
+        print_device_name(&status.device, machine_id);
         println!("  {} {}", "网络名称:".bold(), network_name);
         if let Some(ip) = &net.node_ipv4 {
             println!("  {} {}", "虚拟 IP:".bold(), ip);
@@ -581,5 +582,14 @@ fn resolve_version(
         Ok(download::normalize_version(stable_version))
     } else {
         anyhow::bail!("Console 未返回可用版本，无法继续下载")
+    }
+}
+
+fn print_device_name(device: &DeviceSummary, machine_id: &str) {
+    let name = device.hostname.trim();
+    if !name.is_empty() {
+        crate::style::ok_kv("设备名称:", name);
+    } else {
+        crate::style::ok_kv("设备名称:", machine_id);
     }
 }
