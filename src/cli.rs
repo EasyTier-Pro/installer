@@ -246,7 +246,17 @@ async fn ensure_logged_in(
         ));
     }
 
-    let me = client.get_me().await?;
+    let me = match client.get_me().await {
+        Ok(me) => me,
+        Err(err) if is_unauthorized_error(&err) => {
+            crate::style::warning("登录已失效，正在重新登录...");
+            token_store.clear()?;
+            login::cmd_login(config, token_store.clone()).await?;
+            client = ConsoleClient::new(&config.console_base_url, token_store.clone());
+            client.get_me().await?
+        }
+        Err(err) => return Err(err),
+    };
     let user_label = if let Some(name) = &me.user.display_name {
         format!("{} <{}>", name, me.user.email)
     } else {
@@ -263,6 +273,11 @@ async fn ensure_logged_in(
     }
 
     Ok(client)
+}
+
+fn is_unauthorized_error(err: &anyhow::Error) -> bool {
+    let text = err.to_string();
+    text.contains(r#""code":"unauthorized""#) || text.contains("unauthorized")
 }
 
 #[cfg(test)]
@@ -394,5 +409,17 @@ mod tests {
             Some(std::path::Path::new("/tmp/easytier"))
         );
         assert_eq!(args.version.as_deref(), Some("v2.6.4"));
+    }
+
+    #[test]
+    fn detects_unauthorized_errors() {
+        let err = anyhow::Error::msg(r#"请求失败: {"code":"unauthorized","error":"unauthorized"}"#);
+        assert!(is_unauthorized_error(&err));
+    }
+
+    #[test]
+    fn ignores_other_errors() {
+        let err = anyhow::anyhow!("请求失败: internal server error");
+        assert!(!is_unauthorized_error(&err));
     }
 }
