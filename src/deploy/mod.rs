@@ -261,9 +261,8 @@ async fn onboard_device(
         println!("  {} {}", "网络网段:".bold(), &net.ipv4_cidr);
         println!("  {} {}台", "网络节点:".bold(), nodes.len());
         println!(
-            "  {} {}",
-            "控制台地址:".bold(),
-            "https://console.easytier.net"
+            "  {} https://console.easytier.net",
+            "控制台地址:".bold()
         );
     }
 
