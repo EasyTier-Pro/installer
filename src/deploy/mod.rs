@@ -127,6 +127,7 @@ async fn onboard_device(
         crate::style::warning("设备注册超时，您可以稍后通过控制台手动将设备加入网络");
         return Ok(());
     };
+    print_device_name(&device, machine_id);
 
     let all_networks = match client.list_networks(&tenant.id).await {
         Ok(n) => n,
@@ -180,21 +181,10 @@ async fn onboard_device(
             if let Ok(status) = client.get_machine_status(&tenant.id, machine_id).await
                 && let Some(net) = status.networks.first()
             {
-                let nodes = client
-                    .get_network_nodes(&tenant.id, &net.id)
-                    .await
-                    .unwrap_or_default();
-                println!();
-                crate::style::info("设备配置如下：");
-                println!("  {} {}", "已加入网络:".bold(), &net.name);
-                if let Some(ip) = &net.node_ipv4 {
-                    println!("  {} {}", "虚拟 IP:".bold(), ip);
-                }
-                println!("  {} {}", "网络网段:".bold(), &net.ipv4_cidr);
-                println!("  {} {}台", "网络节点:".bold(), nodes.len());
-                println!("  {} {}", "控制台地址:".bold(), console_base_url);
+                (net.id.clone(), net.name.clone())
+            } else {
+                (String::new(), String::from("网络"))
             }
-            return Ok(());
         }
         NetworkAction::Join(network_id) => {
             let node_req = CreateNodeRequest {
@@ -264,7 +254,6 @@ async fn onboard_device(
             .unwrap_or_default();
         println!();
         crate::style::info("设备已成功配置：");
-        print_device_name(&status.device, machine_id);
         println!("  {} {}", "网络名称:".bold(), network_name);
         if let Some(ip) = &net.node_ipv4 {
             println!("  {} {}", "虚拟 IP:".bold(), ip);
