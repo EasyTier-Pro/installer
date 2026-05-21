@@ -82,7 +82,6 @@ async fn onboard_device(
     tenant: &TenantSummary,
     machine_id: &str,
     recommended_region: &str,
-    console_base_url: &str,
 ) -> anyhow::Result<()> {
     println!();
     crate::style::info("正在等待设备注册到控制台...");
@@ -260,7 +259,11 @@ async fn onboard_device(
         }
         println!("  {} {}", "网络网段:".bold(), &net.ipv4_cidr);
         println!("  {} {}台", "网络节点:".bold(), nodes.len());
-        println!("  {} {}", "控制台地址:".bold(), console_base_url);
+        println!(
+            "  {} {}",
+            "控制台地址:".bold(),
+            "https://console.easytier.net"
+        );
     }
 
     Ok(())
@@ -428,7 +431,7 @@ pub(crate) async fn run_deploy(
         "EasyTier".bright_white()
     ));
 
-    onboard_device(client, tenant, &machine_id, "", &config.console_base_url).await?;
+    onboard_device(client, tenant, &machine_id, "").await?;
 
     Ok(())
 }
