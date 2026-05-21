@@ -6,24 +6,29 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0"
 libc = "0.2"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 directories = "6.0"
-indicatif = { version = "0.18.4", features = ["tokio"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls-vendored", "stream"] }
+indicatif = "0.18.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "time"] }
 colored = "2"
-console = "0.15"
+console = "0.16"
 ctrlc = "3"
 crossterm = "0.29"
-dialoguer = "0.11"
+dialoguer = "0.12"
 tokio-stream = "0.1"
 toml = "0.8"
 tokio-util = { version = "0.7", features = ["io"] }
 uuid = { version = "1", features = ["v4"] }
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
+
+[target.'cfg(not(target_arch = "mips"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+[target.'cfg(target_arch = "mips")'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls-vendored", "stream"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_Registry"] }
