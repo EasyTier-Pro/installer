@@ -2,12 +2,19 @@
 
 跨平台一键部署工具。运行后自动引导完成登录、获取注册密钥、下载 EasyTier、安装系统服务的全部流程。
 
+> **下载源说明**：install 脚本优先从 **Gitee** 下载 installer 二进制，若失败则自动回退到 GitHub。
+
 ## 快速安装
 
 ### Linux / macOS
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/EasyTier-Pro/installer/main/install.sh | bash
+```
+
+国内网络可改用 gitee：
+```bash
+curl -fsSL https://gitee.com/easytier/easytier-pro-installer/raw/main/install.sh | bash
 ```
 
 指定安装目录（将 installer 下载到该目录后执行）：
@@ -19,6 +26,11 @@ curl -fsSL https://raw.githubusercontent.com/EasyTier-Pro/installer/main/install
 
 ```powershell
 irm https://raw.githubusercontent.com/EasyTier-Pro/installer/main/install.ps1 | iex
+```
+
+国内网络可改用 gitee：
+```powershell
+irm https://gitee.com/easytier/easytier-pro-installer/raw/main/install.ps1 | iex
 ```
 
 ## 用法
