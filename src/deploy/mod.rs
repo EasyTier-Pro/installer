@@ -506,9 +506,14 @@ pub(crate) async fn run_upgrade(install_dir: &Path, target_version: &str) -> any
         if !stderr.is_empty() {
             println!("  {}", stderr.trim());
         }
-        anyhow::bail!("停止服务失败，无法继续升级");
+        if stderr.contains("already stopped") || stderr.contains("Service is stopped") {
+            crate::style::success("服务已停止");
+        } else {
+            anyhow::bail!("停止服务失败，无法继续升级");
+        }
+    } else {
+        crate::style::success("服务已停止");
     }
-    crate::style::success("服务已停止");
 
     let (_, cli_path, _) =
         download::download_easytier_with_fallback(&platform, install_dir, &target_version).await?;
@@ -528,7 +533,11 @@ pub(crate) async fn run_upgrade(install_dir: &Path, target_version: &str) -> any
         if !stderr.is_empty() {
             println!("  {}", stderr.trim());
         }
-        crate::style::warning("启动失败，请尝试重新部署");
+        if stderr.contains("already running") {
+            crate::style::success("服务已重启");
+        } else {
+            crate::style::warning("启动失败，请尝试重新部署");
+        }
     }
 
     println!();
