@@ -73,23 +73,6 @@ pub struct DeviceEnrollmentKeySecret {
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
-pub struct GetStartedResponse {
-    #[serde(default)]
-    pub config_server_url: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub commands: std::collections::HashMap<String, String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub downloads: std::collections::HashMap<String, String>,
-    #[serde(default)]
-    pub release_channels: GetStartedReleaseChannels,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub recommended_region: String,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct LatestReleaseResponse {
     #[serde(default)]
     pub stable: ReleaseChannelInfo,
@@ -102,27 +85,6 @@ pub struct LatestReleaseResponse {
 pub struct ReleaseChannelInfo {
     #[serde(default)]
     pub version: String,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-pub struct GetStartedReleaseChannels {
-    #[serde(default)]
-    pub stable: GetStartedReleaseChannel,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub testing: GetStartedReleaseChannel,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-pub struct GetStartedReleaseChannel {
-    #[serde(default)]
-    pub version: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub page_url: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub configured: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -331,14 +293,6 @@ impl ConsoleClient {
                 "/api/v1/tenants/{}/device-enrollment-keys/{}/secret",
                 tenant_id, key_id
             ),
-        )
-        .await
-    }
-
-    pub async fn get_started(&self, tenant_id: &str) -> anyhow::Result<GetStartedResponse> {
-        self.request(
-            Method::GET,
-            &format!("/api/v1/tenants/{}/get-started", tenant_id),
         )
         .await
     }

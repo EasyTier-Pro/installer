@@ -137,13 +137,13 @@ async fn run_install(cli: Cli, args: InstallArgs) -> anyhow::Result<()> {
     }
 
     client = ensure_logged_in(&config, token_store.clone(), client).await?;
-    let (tenant, get_started) = deploy::load_console_bootstrap(&client).await?;
+    let (tenant, latest_release) = deploy::load_console_bootstrap(&client).await?;
 
     deploy::run_deploy(
         &config,
         &client,
         &tenant,
-        &get_started,
+        &latest_release,
         cli.install_dir,
         cli.config_server,
         args.version,

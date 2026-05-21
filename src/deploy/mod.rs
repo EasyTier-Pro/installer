@@ -9,8 +9,8 @@ pub(crate) use platform::default_install_dir;
 pub(crate) use service::{run_status, run_uninstall};
 
 use crate::api::client::{
-    ConsoleClient, CreateNetworkRequest, CreateNodeRequest, DeviceSummary, GetStartedResponse,
-    LatestReleaseResponse, NetworkSummary, TenantSummary,
+    ConsoleClient, CreateNetworkRequest, CreateNodeRequest, DeviceSummary, LatestReleaseResponse,
+    NetworkSummary, TenantSummary,
 };
 use crate::config::Config;
 use colored::Colorize;
@@ -280,7 +280,7 @@ pub(crate) async fn run_deploy(
     config: &Config,
     client: &ConsoleClient,
     tenant: &TenantSummary,
-    get_started: &GetStartedResponse,
+    latest_release: &LatestReleaseResponse,
     install_dir: Option<PathBuf>,
     config_server_base: Option<String>,
     version_override: Option<String>,
@@ -345,16 +345,8 @@ pub(crate) async fn run_deploy(
     };
 
     // 3. 构造 config server URL
-    let config_server = platform::build_config_server_url(
-        &config.console_base_url,
-        config_server_base.or_else(|| {
-            if get_started.config_server_url.is_empty() {
-                None
-            } else {
-                Some(get_started.config_server_url.clone())
-            }
-        }),
-    )?;
+    let config_server =
+        platform::build_config_server_url(&config.console_base_url, config_server_base)?;
     let full_config_url = format!(
         "{}/{}",
         config_server.trim_end_matches('/'),
@@ -365,7 +357,7 @@ pub(crate) async fn run_deploy(
 
     // 4. 检测平台并下载 easytier
     let platform = platform::detect_platform()?;
-    let stable_version = &get_started.release_channels.stable.version;
+    let stable_version = &latest_release.stable.version;
     let download_version = resolve_version(stable_version, version_override)?;
     crate::style::info(&format!(
         "正在下载 easytier {} ({}-{})...",
@@ -426,14 +418,7 @@ pub(crate) async fn run_deploy(
         "EasyTier".bright_white()
     ));
 
-    onboard_device(
-        client,
-        tenant,
-        &machine_id,
-        &get_started.recommended_region,
-        &config.console_base_url,
-    )
-    .await?;
+    onboard_device(client, tenant, &machine_id, "", &config.console_base_url).await?;
 
     Ok(())
 }
@@ -544,7 +529,7 @@ pub(crate) async fn run_upgrade(install_dir: &Path, target_version: &str) -> any
 
 pub(crate) async fn load_console_bootstrap(
     client: &ConsoleClient,
-) -> anyhow::Result<(TenantSummary, GetStartedResponse)> {
+) -> anyhow::Result<(TenantSummary, LatestReleaseResponse)> {
     let me = client.get_me().await?;
     if me.tenants.is_empty() {
         anyhow::bail!("您不属于任何工作空间，无法部署设备");
@@ -562,8 +547,8 @@ pub(crate) async fn load_console_bootstrap(
         t
     };
 
-    let get_started = client.get_started(&tenant.id).await?;
-    Ok((tenant, get_started))
+    let latest_release = client.get_latest_release().await?;
+    Ok((tenant, latest_release))
 }
 
 fn resolve_version(
