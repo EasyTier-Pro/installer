@@ -253,6 +253,7 @@ async fn onboard_device(
             .unwrap_or_default();
         println!();
         crate::style::info("设备已成功配置：");
+        print_device_name(&status.device, machine_id);
         println!("  {} {}", "网络名称:".bold(), network_name);
         if let Some(ip) = &net.node_ipv4 {
             println!("  {} {}", "虚拟 IP:".bold(), ip);
