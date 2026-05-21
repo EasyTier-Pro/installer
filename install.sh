@@ -71,13 +71,13 @@ download_cmd() {
 
 # 获取最新版本
 echo "正在查询最新版本..."
-LATEST=$(download_cmd "$RELEASE_API_BASE/$REPO/releases/latest" /dev/stdout | grep '"tag_name":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+LATEST=$(download_cmd "$RELEASE_API_BASE/$REPO/releases/latest" /dev/stdout | grep -o '"tag_name":"[^"]*"' | head -n 1 | cut -d'"' -f4)
 if [ -z "$LATEST" ]; then
     echo "gitee 获取失败，尝试 github..."
     RELEASE_API_BASE="https://api.github.com/repos"
     RELEASE_DOWNLOAD_BASE="https://github.com"
     REPO="$GITHUB_REPO"
-    LATEST=$(download_cmd "$RELEASE_API_BASE/$REPO/releases/latest" /dev/stdout | grep '"tag_name":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+    LATEST=$(download_cmd "$RELEASE_API_BASE/$REPO/releases/latest" /dev/stdout | grep -o '"tag_name":"[^"]*"' | head -n 1 | cut -d'"' -f4)
     if [ -z "$LATEST" ]; then
         echo "错误：无法获取最新版本信息"
         exit 1
@@ -96,11 +96,22 @@ fi
 URL="$RELEASE_DOWNLOAD_BASE/$REPO/releases/download/$LATEST/$ASSET"
 
 # 安装目录
-INSTALL_DIR="${INSTALL_DIR:-.}"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/easytier-pro-installer}"
 mkdir -p "$INSTALL_DIR"
 DEST="$INSTALL_DIR/$BIN_NAME"
+VERSION_FILE="$DEST.version"
+
+# 检查本地缓存
+if [ -f "$DEST" ] && [ -f "$VERSION_FILE" ]; then
+    LOCAL_VERSION=$(cat "$VERSION_FILE" 2>/dev/null || true)
+    if [ "$LOCAL_VERSION" = "$LATEST" ]; then
+        echo "本地已是最新版本 $LATEST，跳过下载"
+        exec "$DEST" "$@"
+    fi
+fi
 
 # 下载
+echo "目标路径: $DEST"
 echo "正在下载 $ASSET ($LATEST)..."
 echo "  来源: $URL"
 
@@ -113,6 +124,7 @@ fi
 
 mv "$TMP_DEST" "$DEST"
 chmod +x "$DEST"
+echo "$LATEST" > "$VERSION_FILE"
 
 echo ""
 echo "下载完成: $DEST"

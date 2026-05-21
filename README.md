@@ -17,7 +17,7 @@ curl -fsSL https://raw.githubusercontent.com/EasyTier-Pro/installer/main/install
 curl -fsSL https://gitee.com/easytier/easytier-pro-installer/raw/main/install.sh | bash
 ```
 
-指定安装目录（将 installer 下载到该目录后执行）：
+默认下载到 `~/.local/share/easytier-pro-installer/`，可通过环境变量指定：
 ```bash
 curl -fsSL https://raw.githubusercontent.com/EasyTier-Pro/installer/main/install.sh | INSTALL_DIR=/usr/local/bin bash
 ```
@@ -33,20 +33,46 @@ irm https://raw.githubusercontent.com/EasyTier-Pro/installer/main/install.ps1 | 
 irm https://gitee.com/easytier/easytier-pro-installer/raw/main/install.ps1 | iex
 ```
 
+默认下载到 `%LOCALAPPDATA%\easytier-pro-installer\`，可通过参数指定：
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/EasyTier-Pro/installer/main/install.ps1))) -InstallDir C:\Tools
+```
+
 ## 用法
 
-```bash
-# 直接运行，按提示操作即可
-./easytier-pro-installer
+通过 install 脚本运行后会自动启动 installer，无需手动找到文件：
 
+```bash
+# Linux / macOS（每次运行都会检查更新并自动启动）
+curl -fsSL https://gitee.com/easytier/easytier-pro-installer/raw/main/install.sh | bash
+
+# Windows
+irm https://gitee.com/easytier/easytier-pro-installer/raw/main/install.ps1 | iex
+```
+
+如需手动运行已下载的 installer：
+
+```bash
+# Linux / macOS
+~/.local/share/easytier-pro-installer/easytier-pro-installer
+
+# Windows
+%LOCALAPPDATA%\easytier-pro-installer\easytier-pro-installer.exe
+```
+
+首次运行后，直接执行上述路径即可，不再需要通过 install 脚本。
+
+运行示例：
+```bash
+~/.local/share/easytier-pro-installer/easytier-pro-installer
 # 等价于
-./easytier-pro-installer install
+~/.local/share/easytier-pro-installer/easytier-pro-installer install
 ```
 
 典型流程：
 
 ```
-$ ./easytier-pro-installer
+$ ~/.local/share/easytier-pro-installer/easytier-pro-installer
 您尚未登录 Console，正在引导登录...
 
 正在获取登录验证码...
@@ -92,19 +118,19 @@ EasyTier 已就绪: ...
 
 ```bash
 # 更新已安装的 EasyTier
-./easytier-pro-installer update
+~/.local/share/easytier-pro-installer/easytier-pro-installer update
 
 # 更新到指定版本
-./easytier-pro-installer update --version v2.6.4
+~/.local/share/easytier-pro-installer/easytier-pro-installer update --version v2.6.4
 
 # 查看服务状态
-./easytier-pro-installer status
+~/.local/share/easytier-pro-installer/easytier-pro-installer status
 
 # 卸载服务，保留已下载文件和缓存
-./easytier-pro-installer uninstall
+~/.local/share/easytier-pro-installer/easytier-pro-installer uninstall
 
 # 彻底卸载，删除安装目录和缓存压缩包
-./easytier-pro-installer uninstall --purge
+~/.local/share/easytier-pro-installer/easytier-pro-installer uninstall --purge
 ```
 
 ## 可选参数

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 
 param(
-    [string]$InstallDir = ".",
+    [string]$InstallDir = "$env:LOCALAPPDATA\easytier-pro-installer",
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$InstallerArgs
 )
@@ -57,8 +57,20 @@ if (-not $InstallPath) {
 }
 
 $Dest = Join-Path $InstallPath "easytier-pro-installer.exe"
+$VersionFile = "$Dest.version"
+
+# 检查本地缓存
+if ((Test-Path $Dest) -and (Test-Path $VersionFile)) {
+    $LocalVersion = Get-Content $VersionFile -Raw
+    if ($LocalVersion.Trim() -eq $Version) {
+        Write-Host "本地已是最新版本 $Version，跳过下载"
+        & $Dest @InstallerArgs
+        exit 0
+    }
+}
 
 # 下载
+Write-Host "目标路径: $Dest"
 Write-Host "正在下载 $Asset ($Version)..."
 Write-Host "  来源: $Url"
 
@@ -69,6 +81,8 @@ try {
     Write-Error "错误：下载失败: $_"
     exit 1
 }
+
+$Version | Out-File $VersionFile -Encoding utf8
 
 Write-Host ""
 Write-Host "下载完成: $Dest"
