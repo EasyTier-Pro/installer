@@ -3,6 +3,7 @@ use crate::auth::login;
 use crate::auth::token_store::TokenStore;
 use crate::config::Config;
 use crate::deploy::{self, ExistingAction};
+use crate::desktop;
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -41,11 +42,18 @@ pub enum Command {
     /// 查看服务状态
     Status,
 
+    /// 面向桌面端的 JSON 子进程协议
+    #[command(subcommand)]
+    Desktop(DesktopCommand),
+
     #[command(name = "install-service", hide = true)]
     InstallService(InstallServiceArgs),
 
     #[command(name = "upgrade-service", hide = true)]
     UpgradeService(UpgradeServiceArgs),
+
+    #[command(name = "uninstall-service", hide = true)]
+    UninstallService(UninstallServiceArgs),
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -76,13 +84,67 @@ pub struct InstallServiceArgs {
     pub service_config_url: Option<String>,
 
     #[arg(long)]
+    pub service_config_url_file: Option<PathBuf>,
+
+    #[arg(long)]
     pub service_machine_id: Option<String>,
+
+    #[arg(long)]
+    pub service_strict_start: bool,
+
+    #[arg(long, hide = true)]
+    pub desktop_lock_dir: Option<PathBuf>,
+
+    #[arg(long, hide = true)]
+    pub desktop_parent_lock_held: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct UpgradeServiceArgs {
     #[arg(short, long, env = "EASYTIER_VERSION")]
     pub version: Option<String>,
+
+    #[arg(long)]
+    pub service_strict_start: bool,
+
+    #[arg(long, hide = true)]
+    pub desktop_lock_dir: Option<PathBuf>,
+
+    #[arg(long, hide = true)]
+    pub desktop_parent_lock_held: bool,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct UninstallServiceArgs {
+    #[arg(long)]
+    pub purge: bool,
+
+    #[arg(long, hide = true)]
+    pub desktop_lock_dir: Option<PathBuf>,
+
+    #[arg(long, hide = true)]
+    pub desktop_parent_lock_held: bool,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum DesktopCommand {
+    /// 查看本机 EasyTier 服务状态
+    Status(DesktopJsonArgs),
+
+    /// 非交互安装并启动 EasyTier 服务
+    Install(DesktopJsonArgs),
+
+    /// 非交互卸载 EasyTier 服务
+    Uninstall(DesktopJsonArgs),
+
+    /// 非交互更新 EasyTier 二进制并重启服务
+    Update(DesktopJsonArgs),
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct DesktopJsonArgs {
+    #[arg(long)]
+    pub json: bool,
 }
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
@@ -96,8 +158,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Update(args) => run_update(cli, args).await,
         Command::Uninstall(args) => run_uninstall(cli, args).await,
         Command::Status => deploy::run_status(cli.install_dir).await,
+        Command::Desktop(command) => desktop::run(cli, command).await,
         Command::InstallService(args) => run_install_service(cli, args).await,
         Command::UpgradeService(args) => run_upgrade_service(cli, args).await,
+        Command::UninstallService(args) => run_uninstall_service(cli, args).await,
     }
 }
 
@@ -201,10 +265,7 @@ async fn run_install_service(cli: Cli, args: InstallServiceArgs) -> anyhow::Resu
         .service_core_path
         .clone()
         .unwrap_or_else(|| install_dir.join(deploy::core_binary_name()));
-    let config_url = args
-        .service_config_url
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("缺少服务安装参数 service_config_url"))?;
+    let config_url = read_service_config_url(&args)?;
     crate::style::debug(&format!(
         "进入 install-service 分支: install_dir={}, cli_path={}, core_path={}",
         install_dir.display(),
@@ -212,7 +273,40 @@ async fn run_install_service(cli: Cli, args: InstallServiceArgs) -> anyhow::Resu
         core_path.display()
     ));
     let machine_id = args.service_machine_id.as_deref();
-    deploy::service::install_service(&cli_path, &core_path, &config_url, machine_id).await
+    if args.service_strict_start {
+        deploy::run_desktop_install_service(
+            install_dir,
+            core_path,
+            &config_url,
+            machine_id,
+            args.desktop_lock_dir,
+            args.desktop_parent_lock_held,
+        )
+        .await
+    } else {
+        deploy::service::install_service(&cli_path, &core_path, &config_url, machine_id).await
+    }
+}
+
+fn read_service_config_url(args: &InstallServiceArgs) -> anyhow::Result<String> {
+    match (&args.service_config_url, &args.service_config_url_file) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("服务安装参数 service_config_url 和 service_config_url_file 只能指定一个")
+        }
+        (Some(config_url), None) => Ok(config_url.clone()),
+        (None, Some(path)) => {
+            let config_url = std::fs::read_to_string(path)
+                .map_err(|err| anyhow::anyhow!("读取服务配置 URL 文件失败: {}", err))?
+                .trim()
+                .to_string();
+            let _ = std::fs::remove_file(path);
+            if config_url.is_empty() {
+                anyhow::bail!("服务配置 URL 文件不能为空");
+            }
+            Ok(config_url)
+        }
+        (None, None) => anyhow::bail!("缺少服务安装参数 service_config_url"),
+    }
 }
 
 async fn run_upgrade_service(cli: Cli, args: UpgradeServiceArgs) -> anyhow::Result<()> {
@@ -230,7 +324,31 @@ async fn run_upgrade_service(cli: Cli, args: UpgradeServiceArgs) -> anyhow::Resu
         version,
         deploy::platform::is_elevated()
     ));
-    deploy::run_upgrade(&install_dir, &version).await
+    if args.service_strict_start {
+        deploy::run_desktop_update_service(
+            install_dir,
+            &version,
+            args.desktop_lock_dir,
+            args.desktop_parent_lock_held,
+        )
+        .await
+    } else {
+        deploy::run_upgrade(&install_dir, &version).await
+    }
+}
+
+async fn run_uninstall_service(cli: Cli, args: UninstallServiceArgs) -> anyhow::Result<()> {
+    let install_dir = cli
+        .install_dir
+        .clone()
+        .unwrap_or_else(deploy::default_install_dir);
+    deploy::run_desktop_uninstall_service(
+        install_dir,
+        args.purge,
+        args.desktop_lock_dir,
+        args.desktop_parent_lock_held,
+    )
+    .await
 }
 
 async fn ensure_logged_in(
@@ -343,6 +461,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_desktop_install_json_subcommand() {
+        let cli = Cli::parse_from(["easytier-pro-installer", "desktop", "install", "--json"]);
+
+        let Some(Command::Desktop(DesktopCommand::Install(args))) = cli.command else {
+            panic!("expected desktop install command");
+        };
+        assert!(args.json);
+    }
+
+    #[test]
+    fn rejects_removed_desktop_key_subcommands() {
+        let err = Cli::try_parse_from(["easytier-pro-installer", "desktop", "list-keys", "--json"])
+            .unwrap_err();
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
     fn rejects_legacy_top_level_status_flag() {
         let err = Cli::try_parse_from(["easytier-pro-installer", "--status"]).unwrap_err();
 
@@ -368,6 +504,10 @@ mod tests {
             "tcp://console.easytier.cn:22020/token",
             "--service-machine-id",
             "machine-id",
+            "--service-strict-start",
+            "--desktop-lock-dir",
+            "/tmp/easytier-locks",
+            "--desktop-parent-lock-held",
             "--install-dir",
             "/tmp/easytier",
         ]);
@@ -388,6 +528,33 @@ mod tests {
             Some("tcp://console.easytier.cn:22020/token")
         );
         assert_eq!(args.service_machine_id.as_deref(), Some("machine-id"));
+        assert!(args.service_strict_start);
+        assert_eq!(
+            args.desktop_lock_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/easytier-locks"))
+        );
+        assert!(args.desktop_parent_lock_held);
+    }
+
+    #[test]
+    fn parses_hidden_install_service_config_url_file() {
+        let cli = Cli::parse_from([
+            "easytier-pro-installer",
+            "install-service",
+            "--service-core-path",
+            "/tmp/easytier/easytier-core",
+            "--service-config-url-file",
+            "/tmp/easytier/service-config.secret",
+        ]);
+
+        let Some(Command::InstallService(args)) = cli.command else {
+            panic!("expected install-service command");
+        };
+        assert_eq!(
+            args.service_config_url_file.as_deref(),
+            Some(std::path::Path::new("/tmp/easytier/service-config.secret"))
+        );
+        assert!(args.service_config_url.is_none());
     }
 
     #[test]
@@ -397,6 +564,10 @@ mod tests {
             "upgrade-service",
             "--version",
             "v2.6.4",
+            "--service-strict-start",
+            "--desktop-lock-dir",
+            "/tmp/easytier-locks",
+            "--desktop-parent-lock-held",
             "--install-dir",
             "/tmp/easytier",
         ]);
@@ -409,6 +580,40 @@ mod tests {
             Some(std::path::Path::new("/tmp/easytier"))
         );
         assert_eq!(args.version.as_deref(), Some("v2.6.4"));
+        assert!(args.service_strict_start);
+        assert_eq!(
+            args.desktop_lock_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/easytier-locks"))
+        );
+        assert!(args.desktop_parent_lock_held);
+    }
+
+    #[test]
+    fn parses_hidden_uninstall_service_with_global_install_dir() {
+        let cli = Cli::parse_from([
+            "easytier-pro-installer",
+            "uninstall-service",
+            "--purge",
+            "--desktop-lock-dir",
+            "/tmp/easytier-locks",
+            "--desktop-parent-lock-held",
+            "--install-dir",
+            "/tmp/easytier",
+        ]);
+
+        let Some(Command::UninstallService(args)) = cli.command else {
+            panic!("expected uninstall-service command");
+        };
+        assert_eq!(
+            cli.install_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/easytier"))
+        );
+        assert!(args.purge);
+        assert_eq!(
+            args.desktop_lock_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/easytier-locks"))
+        );
+        assert!(args.desktop_parent_lock_held);
     }
 
     #[test]

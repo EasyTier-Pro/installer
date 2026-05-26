@@ -3,6 +3,12 @@ use colored::Colorize;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DownloadProgress {
+    pub(crate) downloaded: u64,
+    pub(crate) total: Option<u64>,
+}
+
 pub(crate) fn normalize_version(version: &str) -> String {
     if version.starts_with('v') {
         version.to_string()
@@ -57,24 +63,63 @@ pub(crate) async fn download_easytier_with_fallback(
     install_dir: &Path,
     version: &str,
 ) -> anyhow::Result<(PathBuf, PathBuf, String)> {
+    let mut ignore_progress = |_progress: DownloadProgress| Ok(());
+    download_easytier_with_fallback_impl(
+        platform,
+        install_dir,
+        version,
+        &mut ignore_progress,
+        false,
+    )
+    .await
+}
+
+pub(crate) async fn download_easytier_with_fallback_report<F>(
+    platform: &Platform,
+    install_dir: &Path,
+    version: &str,
+    on_progress: &mut F,
+) -> anyhow::Result<(PathBuf, PathBuf, String)>
+where
+    F: FnMut(DownloadProgress) -> anyhow::Result<()>,
+{
+    download_easytier_with_fallback_impl(platform, install_dir, version, on_progress, true).await
+}
+
+async fn download_easytier_with_fallback_impl<F>(
+    platform: &Platform,
+    install_dir: &Path,
+    version: &str,
+    on_progress: &mut F,
+    quiet: bool,
+) -> anyhow::Result<(PathBuf, PathBuf, String)>
+where
+    F: FnMut(DownloadProgress) -> anyhow::Result<()>,
+{
     let sources = [("gitee", 10u64), ("github_proxy", 10u64), ("github", 10u64)];
     let version = normalize_version(version);
 
     for (source, connect_timeout_secs) in &sources {
         let url = build_download_url(platform, &version, source);
-        crate::style::info(&format!("尝试从 {} 下载...", source.bright_white()));
-        match download_easytier_with_timeout(
+        if !quiet {
+            crate::style::info(&format!("尝试从 {} 下载...", source.bright_white()));
+        }
+        match download_easytier_with_timeout_impl(
             platform,
             install_dir,
             &version,
             &url,
             *connect_timeout_secs,
+            on_progress,
+            quiet,
         )
         .await
         {
             Ok(result) => return Ok(result),
             Err(e) => {
-                crate::style::warning(&format!("{} 不可用: {}", source, e));
+                if !quiet {
+                    crate::style::warning(&format!("{} 不可用: {}", source, e));
+                }
             }
         }
     }
@@ -89,6 +134,31 @@ async fn download_easytier_with_timeout(
     download_url: &str,
     connect_timeout_secs: u64,
 ) -> anyhow::Result<(PathBuf, PathBuf, String)> {
+    let mut ignore_progress = |_progress: DownloadProgress| Ok(());
+    download_easytier_with_timeout_impl(
+        platform,
+        install_dir,
+        version,
+        download_url,
+        connect_timeout_secs,
+        &mut ignore_progress,
+        false,
+    )
+    .await
+}
+
+async fn download_easytier_with_timeout_impl<F>(
+    platform: &Platform,
+    install_dir: &Path,
+    version: &str,
+    download_url: &str,
+    connect_timeout_secs: u64,
+    on_progress: &mut F,
+    quiet: bool,
+) -> anyhow::Result<(PathBuf, PathBuf, String)>
+where
+    F: FnMut(DownloadProgress) -> anyhow::Result<()>,
+{
     let version = normalize_version(version);
 
     let core_name = super::core_binary_name();
@@ -103,7 +173,9 @@ async fn download_easytier_with_timeout(
             .trim()
             .to_string();
         if cached == version {
-            crate::style::info(&format!("本地已有 {}，跳过下载", version.bright_white()));
+            if !quiet {
+                crate::style::info(&format!("本地已有 {}，跳过下载", version.bright_white()));
+            }
             return Ok((core_path, cli_path, version));
         }
     }
@@ -118,11 +190,19 @@ async fn download_easytier_with_timeout(
 
     std::fs::create_dir_all(&cache_dir)?;
     let zip_data = if archive_path.exists() {
-        crate::style::info(&format!(
-            "使用缓存压缩包 {}",
-            archive_path.to_string_lossy().bright_white()
-        ));
-        std::fs::read(&archive_path)?
+        if !quiet {
+            crate::style::info(&format!(
+                "使用缓存压缩包 {}",
+                archive_path.to_string_lossy().bright_white()
+            ));
+        }
+        let zip_data = std::fs::read(&archive_path)?;
+        let size = zip_data.len() as u64;
+        on_progress(DownloadProgress {
+            downloaded: size,
+            total: Some(size),
+        })?;
+        zip_data
     } else {
         let resp = tokio::time::timeout(
             std::time::Duration::from_secs(connect_timeout_secs),
@@ -140,12 +220,17 @@ async fn download_easytier_with_timeout(
         }
 
         let total_size = resp.content_length().unwrap_or(0);
-        let pb = indicatif::ProgressBar::new(total_size);
-        pb.set_style(
-            indicatif::ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
-                .progress_chars("#>-"),
-        );
+        let pb = if quiet {
+            None
+        } else {
+            let pb = indicatif::ProgressBar::new(total_size);
+            pb.set_style(
+                indicatif::ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
+                    .progress_chars("#>-"),
+            );
+            Some(pb)
+        };
 
         let mut zip_data = Vec::new();
         let mut stream = resp.bytes_stream();
@@ -153,15 +238,25 @@ async fn download_easytier_with_timeout(
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             zip_data.extend_from_slice(&chunk);
-            pb.inc(chunk.len() as u64);
+            if let Some(pb) = &pb {
+                pb.inc(chunk.len() as u64);
+            }
+            on_progress(DownloadProgress {
+                downloaded: zip_data.len() as u64,
+                total: (total_size > 0).then_some(total_size),
+            })?;
         }
-        pb.finish_and_clear();
+        if let Some(pb) = &pb {
+            pb.finish_and_clear();
+        }
 
         std::fs::write(&archive_path, &zip_data)?;
-        crate::style::info(&format!(
-            "已缓存压缩包到 {}",
-            archive_path.to_string_lossy().bright_white()
-        ));
+        if !quiet {
+            crate::style::info(&format!(
+                "已缓存压缩包到 {}",
+                archive_path.to_string_lossy().bright_white()
+            ));
+        }
         zip_data
     };
 
@@ -241,7 +336,7 @@ fn find_package_root(
     Ok(None)
 }
 
-fn sync_dir_contents(src: &Path, dst: &Path) -> anyhow::Result<()> {
+pub(crate) fn sync_dir_contents(src: &Path, dst: &Path) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();

@@ -150,6 +150,36 @@ EasyTier 已就绪: ...
 | `update` | `-v, --version` | `EASYTIER_VERSION` | 指定更新到的 EasyTier 版本号 |
 | `uninstall` | `--purge` | - | 彻底删除安装目录和缓存压缩包 |
 
+## 桌面端集成
+
+桌面应用可以随安装包内置 `easytier-pro-installer` 二进制，然后用子进程调用 `desktop` 子命令。桌面端负责登录、选择注册密钥和 Console UI，installer 只负责本机 EasyTier 服务生命周期，并向 `stdout` 输出 JSON Lines 事件。
+
+```bash
+printf '%s' '{}' | easytier-pro-installer desktop status --json
+```
+
+常用命令：
+
+```bash
+easytier-pro-installer desktop status --json
+easytier-pro-installer desktop install --json
+easytier-pro-installer desktop update --json
+easytier-pro-installer desktop uninstall --json
+```
+
+安装请求示例：
+
+```json
+{
+  "bootstrap_token": "BOOTSTRAP_TOKEN",
+  "install_dir": "/opt/easytier",
+  "config_server": "tcp://console.easytier.net:22020",
+  "version": "v2.6.4"
+}
+```
+
+`install` 使用桌面端传入的 `bootstrap_token` 创建服务；`update` 必须传入目标 `version` 并会更新二进制后重启服务；`uninstall` 可传 `purge: true` 删除安装目录和缓存。`status` 只返回本机 core/cli、版本、machine id 和服务状态，不访问 Console。
+
 ## 构建
 
 ```bash

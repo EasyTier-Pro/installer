@@ -108,21 +108,30 @@ pub(crate) fn relaunch_elevated_with_args(
 ) -> anyhow::Result<std::process::ExitStatus> {
     let mut args = std::env::args().skip(1).collect::<Vec<String>>();
     args.extend(extra_args.iter().map(|s| s.to_string()));
-    relaunch_elevated_with_final_args(args)
+    relaunch_elevated_with_final_args(args, false)
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn relaunch_elevated_with_replaced_args(
     args: &[&str],
 ) -> anyhow::Result<std::process::ExitStatus> {
-    relaunch_elevated_with_final_args(args.iter().map(|s| s.to_string()).collect())
+    relaunch_elevated_with_final_args(args.iter().map(|s| s.to_string()).collect(), false)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn relaunch_elevated_with_replaced_args_hidden(
+    args: &[&str],
+) -> anyhow::Result<std::process::ExitStatus> {
+    relaunch_elevated_with_final_args(args.iter().map(|s| s.to_string()).collect(), true)
 }
 
 fn relaunch_elevated_with_final_args(
     args: Vec<String>,
+    hidden: bool,
 ) -> anyhow::Result<std::process::ExitStatus> {
     #[cfg(unix)]
     {
+        let _ = hidden;
         let exe = std::env::current_exe()?;
 
         let mut cmd = std::process::Command::new("sudo");
@@ -154,7 +163,10 @@ fn relaunch_elevated_with_final_args(
                 local_app_data
             ));
         }
-        crate::style::debug(&format!("Windows 提权开始: 初始参数={:?}", args));
+        crate::style::debug(&format!(
+            "Windows 提权开始: 初始参数={:?}",
+            redact_sensitive_args(&args)
+        ));
         let has_install_dir_arg = args.iter().any(|arg| arg == "--install-dir" || arg == "-i");
         if !has_install_dir_arg {
             let install_dir = default_install_dir();
@@ -170,23 +182,16 @@ fn relaunch_elevated_with_final_args(
             crate::style::debug("Windows 提权开始: 自动追加 --debug");
             args.push("--debug".to_string());
         }
-        crate::style::debug(&format!("Windows 提权开始: 最终参数={:?}", args));
+        crate::style::debug(&format!(
+            "Windows 提权开始: 最终参数={:?}",
+            redact_sensitive_args(&args)
+        ));
 
-        // 构建参数字符串（简单转义：含空格则加引号）
-        let mut params = String::new();
-        for (i, arg) in args.iter().enumerate() {
-            if i > 0 {
-                params.push(' ');
-            }
-            if arg.contains(' ') || arg.contains('\t') {
-                params.push('"');
-                params.push_str(arg);
-                params.push('"');
-            } else {
-                params.push_str(arg);
-            }
-        }
-        crate::style::debug(&format!("Windows 提权开始: 参数字符串={}", params));
+        let params = format_windows_params(&args);
+        crate::style::debug(&format!(
+            "Windows 提权开始: 参数字符串={}",
+            format_windows_params(&redact_sensitive_args(&args))
+        ));
 
         let exe_wide: Vec<u16> = std::ffi::OsStr::new(&exe)
             .encode_wide()
@@ -210,7 +215,11 @@ fn relaunch_elevated_with_final_args(
             param_wide.as_ptr()
         };
         sei.lpDirectory = cwd_wide.as_ptr();
-        sei.nShow = windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        sei.nShow = if hidden {
+            windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE
+        } else {
+            windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL
+        };
 
         let ok = unsafe { windows_sys::Win32::UI::Shell::ShellExecuteExW(&mut sei) };
         if ok == 0 {
@@ -249,6 +258,68 @@ fn relaunch_elevated_with_final_args(
             Ok(std::process::ExitStatus::from_raw(exit_code))
         }
     }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn redact_sensitive_args(args: &[String]) -> Vec<String> {
+    let mut redacted = Vec::with_capacity(args.len());
+    let mut redact_next = false;
+    for arg in args {
+        if redact_next {
+            redacted.push("<redacted>".to_string());
+            redact_next = false;
+            continue;
+        }
+
+        if arg == "--service-config-url" {
+            redacted.push(arg.clone());
+            redact_next = true;
+        } else if arg.starts_with("--service-config-url=") {
+            redacted.push("--service-config-url=<redacted>".to_string());
+        } else {
+            redacted.push(arg.clone());
+        }
+    }
+    redacted
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn format_windows_params(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| quote_windows_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn quote_windows_arg(arg: &str) -> String {
+    if !arg.is_empty()
+        && !arg
+            .chars()
+            .any(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '"'))
+    {
+        return arg.to_string();
+    }
+
+    let mut quoted = String::from("\"");
+    let mut backslashes = 0;
+    for ch in arg.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
+                quoted.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                quoted.push_str(&"\\".repeat(backslashes));
+                backslashes = 0;
+                quoted.push(ch);
+            }
+        }
+    }
+    quoted.push_str(&"\\".repeat(backslashes * 2));
+    quoted.push('"');
+    quoted
 }
 
 pub(crate) fn build_config_server_url(
@@ -304,5 +375,42 @@ mod tests {
             .expect("config server url");
 
         assert_eq!(url, "tcp://api.console.easytier.net:22020");
+    }
+
+    #[test]
+    fn redacts_service_config_url_from_debug_args() {
+        let args = vec![
+            "install-service".to_string(),
+            "--service-config-url".to_string(),
+            "tcp://console.easytier.cn:22020/bootstrap-token".to_string(),
+            "--install-dir".to_string(),
+            "/tmp/easytier".to_string(),
+        ];
+
+        assert_eq!(
+            redact_sensitive_args(&args),
+            vec![
+                "install-service".to_string(),
+                "--service-config-url".to_string(),
+                "<redacted>".to_string(),
+                "--install-dir".to_string(),
+                "/tmp/easytier".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn quotes_windows_args_with_embedded_quotes_and_backslashes() {
+        let args = vec![
+            "upgrade-service".to_string(),
+            "--version".to_string(),
+            r#"v2.6.4" --install-dir C:\bad"#.to_string(),
+            r#"C:\Program Files\EasyTier\"#.to_string(),
+        ];
+
+        assert_eq!(
+            format_windows_params(&args),
+            r#"upgrade-service --version "v2.6.4\" --install-dir C:\bad" "C:\Program Files\EasyTier\\""#,
+        );
     }
 }

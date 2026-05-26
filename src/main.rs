@@ -5,6 +5,7 @@ mod auth;
 mod cli;
 mod config;
 mod deploy;
+mod desktop;
 mod style;
 
 #[tokio::main]
@@ -27,9 +28,12 @@ async fn main() {
     }
     style::debug("main 启动: CLI 参数解析完成");
 
+    let is_desktop = matches!(&cli.command, Some(cli::Command::Desktop(_)));
     if let Err(e) = cli::run(cli).await {
         style::debug(&format!("main 退出: {}", e));
-        style::error(&format!("{}", e));
+        if !is_desktop {
+            style::error(&format!("{}", e));
+        }
         std::process::exit(1);
     }
 }

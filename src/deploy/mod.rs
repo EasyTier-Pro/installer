@@ -14,7 +14,145 @@ use crate::api::client::{
 };
 use crate::config::Config;
 use colored::Colorize;
+use fs2::FileExt;
+use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
+
+type DesktopEventEmitter<'a> =
+    &'a mut dyn FnMut(&'static str, serde_json::Value) -> anyhow::Result<()>;
+
+#[derive(Debug)]
+struct DesktopLifecycleLock {
+    _file: std::fs::File,
+}
+
+fn hold_desktop_lifecycle_lock(_lock: &DesktopLifecycleLock) {}
+
+struct DesktopPreparedUpdate {
+    staging_dir: PathBuf,
+    version: String,
+}
+
+impl Drop for DesktopPreparedUpdate {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.staging_dir);
+    }
+}
+
+#[cfg(windows)]
+struct DesktopSecretFile {
+    path: PathBuf,
+}
+
+#[cfg(windows)]
+impl DesktopSecretFile {
+    fn create(contents: &str) -> anyhow::Result<Self> {
+        let dir = desktop_lifecycle_dir();
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!(
+            "desktop-service-config-{}.secret",
+            uuid::Uuid::new_v4()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        service::restrict_sensitive_file_permissions(&path)?;
+        Ok(Self { path })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for DesktopSecretFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn desktop_lifecycle_dir() -> PathBuf {
+    platform::default_cache_dir()
+        .parent()
+        .map(|path| path.join("locks"))
+        .unwrap_or_else(|| std::env::temp_dir().join("easytier-pro-installer-locks"))
+}
+
+fn acquire_desktop_lifecycle_lock(install_dir: &Path) -> anyhow::Result<DesktopLifecycleLock> {
+    let lock_dir = desktop_lifecycle_dir();
+    acquire_desktop_lifecycle_lock_in(&lock_dir, install_dir)
+}
+
+fn acquire_desktop_lifecycle_lock_in_optional_dir(
+    install_dir: &Path,
+    lock_dir: Option<&Path>,
+) -> anyhow::Result<DesktopLifecycleLock> {
+    if let Some(lock_dir) = lock_dir {
+        acquire_desktop_lifecycle_lock_in(lock_dir, install_dir)
+    } else {
+        acquire_desktop_lifecycle_lock(install_dir)
+    }
+}
+
+fn acquire_desktop_lifecycle_lock_in(
+    lock_dir: &Path,
+    install_dir: &Path,
+) -> anyhow::Result<DesktopLifecycleLock> {
+    std::fs::create_dir_all(lock_dir)?;
+    let lock_path = lock_dir.join("desktop-lifecycle.lock");
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+
+    if let Err(err) = file.try_lock_exclusive() {
+        if err.kind() == std::io::ErrorKind::WouldBlock {
+            anyhow::bail!("已有桌面端安装、更新或卸载任务正在运行");
+        }
+        return Err(err.into());
+    }
+
+    file.set_len(0)?;
+    file.seek(std::io::SeekFrom::Start(0))?;
+    writeln!(file, "pid={}", std::process::id())?;
+    writeln!(file, "install_dir={}", install_dir.display())?;
+    let _ = file.sync_data();
+    Ok(DesktopLifecycleLock { _file: file })
+}
+
+pub(crate) fn ensure_desktop_purge_safe(
+    install_dir: &Path,
+    active_lock_dir: Option<&Path>,
+) -> anyhow::Result<()> {
+    let install_dir = normalize_for_overlap_check(install_dir)?;
+    let default_lock_dir;
+    let active_lock_dir = match active_lock_dir {
+        Some(lock_dir) => lock_dir,
+        None => {
+            default_lock_dir = desktop_lifecycle_dir();
+            &default_lock_dir
+        }
+    };
+    let lock_dir = normalize_for_overlap_check(active_lock_dir)?;
+    if lock_dir.starts_with(&install_dir) {
+        anyhow::bail!("install_dir 不能是桌面端生命周期锁目录或其上级目录");
+    }
+    Ok(())
+}
+
+fn normalize_for_overlap_check(path: &Path) -> anyhow::Result<PathBuf> {
+    if let Ok(path) = std::fs::canonicalize(path) {
+        return Ok(path);
+    }
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
 
 pub(crate) fn core_binary_name() -> &'static str {
     if cfg!(windows) {
@@ -260,10 +398,7 @@ async fn onboard_device(
         }
         println!("  {} {}", "网络网段:".bold(), &net.ipv4_cidr);
         println!("  {} {}台", "网络节点:".bold(), nodes.len());
-        println!(
-            "  {} https://console.easytier.net",
-            "控制台地址:".bold()
-        );
+        println!("  {} https://console.easytier.net", "控制台地址:".bold());
     }
 
     Ok(())
@@ -436,6 +571,543 @@ pub(crate) async fn run_deploy(
     Ok(())
 }
 
+pub(crate) async fn run_desktop_install(
+    install_dir: Option<PathBuf>,
+    config_server: String,
+    bootstrap_token: String,
+    version: String,
+    emit: DesktopEventEmitter<'_>,
+) -> anyhow::Result<()> {
+    let install_dir = install_dir.unwrap_or_else(default_install_dir);
+    let lifecycle_lock = acquire_desktop_lifecycle_lock(&install_dir)?;
+    hold_desktop_lifecycle_lock(&lifecycle_lock);
+    check_install_dir_writable(&install_dir)?;
+    std::fs::create_dir_all(&install_dir)?;
+
+    emit(
+        "started",
+        serde_json::json!({
+            "install_dir": install_dir.to_string_lossy(),
+        }),
+    )?;
+
+    let machine_id = get_or_create_machine_id(&install_dir)?;
+    let full_config_url = format!(
+        "{}/{}",
+        config_server.trim_end_matches('/'),
+        bootstrap_token
+    );
+
+    let platform = platform::detect_platform()?;
+    emit(
+        "platform_detected",
+        serde_json::json!({
+            "os": platform.os,
+            "arch": platform.arch,
+        }),
+    )?;
+
+    let (core_path, cli_path, installed_version) =
+        download_with_desktop_events(&platform, &install_dir, &version, emit).await?;
+
+    emit("service_installing", serde_json::json!({}))?;
+    #[cfg(windows)]
+    if !platform::is_elevated() {
+        let lock_dir = desktop_lifecycle_dir();
+        let service_config = DesktopSecretFile::create(&full_config_url)?;
+        let core_path_str = core_path.to_string_lossy().to_string();
+        let install_dir_str = install_dir.to_string_lossy().to_string();
+        let service_config_path = service_config.path.to_string_lossy().to_string();
+        let lock_dir_str = lock_dir.to_string_lossy().to_string();
+        let mut extra_args = vec![
+            "install-service",
+            "--service-core-path",
+            &core_path_str,
+            "--service-config-url-file",
+            &service_config_path,
+            "--service-strict-start",
+            "--desktop-lock-dir",
+            &lock_dir_str,
+            "--desktop-parent-lock-held",
+            "--install-dir",
+            &install_dir_str,
+        ];
+        if !machine_id.is_empty() {
+            extra_args.push("--service-machine-id");
+            extra_args.push(&machine_id);
+        }
+        let status = platform::relaunch_elevated_with_replaced_args_hidden(&extra_args)?;
+        if !status.success() {
+            anyhow::bail!("提权后的安装服务进程执行失败，请在管理员窗口中查看详细错误");
+        }
+    } else {
+        service::install_service_quiet(&cli_path, &core_path, &full_config_url, Some(&machine_id))
+            .await?;
+    }
+
+    #[cfg(not(windows))]
+    {
+        service::install_service_quiet(&cli_path, &core_path, &full_config_url, Some(&machine_id))
+            .await?;
+    }
+    emit(
+        "service_started",
+        serde_json::json!({
+            "service_name": service::SERVICE_NAME,
+        }),
+    )?;
+
+    emit(
+        "finished",
+        serde_json::json!({
+            "machine_id": machine_id,
+            "install_dir": install_dir.to_string_lossy(),
+            "core_path": core_path.to_string_lossy(),
+            "cli_path": cli_path.to_string_lossy(),
+            "version": installed_version,
+        }),
+    )?;
+
+    Ok(())
+}
+
+pub(crate) async fn run_desktop_install_service(
+    install_dir: PathBuf,
+    core_path: PathBuf,
+    config_url: &str,
+    machine_id: Option<&str>,
+    lock_dir: Option<PathBuf>,
+    parent_lock_held: bool,
+) -> anyhow::Result<()> {
+    let lifecycle_lock = if parent_lock_held {
+        None
+    } else {
+        Some(acquire_desktop_lifecycle_lock_in_optional_dir(
+            &install_dir,
+            lock_dir.as_deref(),
+        )?)
+    };
+    if let Some(lifecycle_lock) = &lifecycle_lock {
+        hold_desktop_lifecycle_lock(lifecycle_lock);
+    }
+    let cli_path = service::find_easytier_cli(&install_dir)?;
+    service::install_service_quiet(&cli_path, &core_path, config_url, machine_id).await
+}
+
+pub(crate) async fn run_desktop_update(
+    install_dir: Option<PathBuf>,
+    target_version: &str,
+    emit: DesktopEventEmitter<'_>,
+) -> anyhow::Result<()> {
+    let install_dir = install_dir.unwrap_or_else(default_install_dir);
+    let lifecycle_lock = acquire_desktop_lifecycle_lock(&install_dir)?;
+    hold_desktop_lifecycle_lock(&lifecycle_lock);
+    let platform = platform::detect_platform()?;
+    let target_version = download::normalize_version(target_version);
+    let current_cli_path = service::find_easytier_cli(&install_dir)?;
+
+    emit(
+        "started",
+        serde_json::json!({
+            "install_dir": install_dir.to_string_lossy(),
+            "version": target_version,
+        }),
+    )?;
+    emit(
+        "platform_detected",
+        serde_json::json!({
+            "os": platform.os,
+            "arch": platform.arch,
+        }),
+    )?;
+
+    let core_path = install_dir.join(core_binary_name());
+    let current_version = service::get_core_version(&core_path);
+    if current_version.as_deref() == Some(&target_version) {
+        emit(
+            "finished",
+            serde_json::json!({
+                "install_dir": install_dir.to_string_lossy(),
+                "version": target_version,
+                "up_to_date": true,
+            }),
+        )?;
+        return Ok(());
+    }
+
+    #[cfg(windows)]
+    if !platform::is_elevated() {
+        let lock_dir = desktop_lifecycle_dir();
+        let install_dir_arg = install_dir.to_string_lossy().to_string();
+        let lock_dir_arg = lock_dir.to_string_lossy().to_string();
+        let status = platform::relaunch_elevated_with_replaced_args_hidden(&[
+            "upgrade-service",
+            "--version",
+            &target_version,
+            "--service-strict-start",
+            "--desktop-lock-dir",
+            &lock_dir_arg,
+            "--desktop-parent-lock-held",
+            "--install-dir",
+            &install_dir_arg,
+        ])?;
+        if !status.success() {
+            anyhow::bail!("提权后的升级进程执行失败，请在管理员窗口中查看详细错误");
+        }
+        emit(
+            "service_started",
+            serde_json::json!({
+                "service_name": service::SERVICE_NAME,
+            }),
+        )?;
+        emit(
+            "finished",
+            serde_json::json!({
+                "install_dir": install_dir.to_string_lossy(),
+                "version": target_version,
+                "up_to_date": false,
+            }),
+        )?;
+        return Ok(());
+    }
+
+    let package =
+        prepare_desktop_update_package_with_events(&platform, &install_dir, &target_version, emit)
+            .await?;
+
+    stop_service_for_update(&current_cli_path).await?;
+    let update_result = async {
+        let (_, cli_path) = install_prepared_desktop_update(&package, &install_dir)?;
+        start_service_strict(&cli_path).await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if let Err(err) = update_result {
+        restart_existing_service_after_failed_update(&install_dir, &current_cli_path).await;
+        return Err(err);
+    }
+    emit(
+        "service_started",
+        serde_json::json!({
+            "service_name": service::SERVICE_NAME,
+        }),
+    )?;
+    emit(
+        "finished",
+        serde_json::json!({
+            "install_dir": install_dir.to_string_lossy(),
+            "version": package.version.clone(),
+            "up_to_date": false,
+        }),
+    )?;
+
+    Ok(())
+}
+
+pub(crate) async fn run_desktop_update_service(
+    install_dir: PathBuf,
+    target_version: &str,
+    lock_dir: Option<PathBuf>,
+    parent_lock_held: bool,
+) -> anyhow::Result<()> {
+    let lifecycle_lock = if parent_lock_held {
+        None
+    } else {
+        Some(acquire_desktop_lifecycle_lock_in_optional_dir(
+            &install_dir,
+            lock_dir.as_deref(),
+        )?)
+    };
+    if let Some(lifecycle_lock) = &lifecycle_lock {
+        hold_desktop_lifecycle_lock(lifecycle_lock);
+    }
+    let platform = platform::detect_platform()?;
+    let target_version = download::normalize_version(target_version);
+    let current_cli_path = service::find_easytier_cli(&install_dir)?;
+
+    let core_path = install_dir.join(core_binary_name());
+    let current_version = service::get_core_version(&core_path);
+    if current_version.as_deref() == Some(&target_version) {
+        return Ok(());
+    }
+
+    let package =
+        prepare_desktop_update_package_quiet(&platform, &install_dir, &target_version).await?;
+
+    stop_service_for_update(&current_cli_path).await?;
+    let update_result = async {
+        let (_, cli_path) = install_prepared_desktop_update(&package, &install_dir)?;
+        start_service_strict(&cli_path).await
+    }
+    .await;
+    if let Err(err) = update_result {
+        restart_existing_service_after_failed_update(&install_dir, &current_cli_path).await;
+        return Err(err);
+    }
+    Ok(())
+}
+
+pub(crate) async fn run_desktop_uninstall_service(
+    install_dir: PathBuf,
+    purge: bool,
+    lock_dir: Option<PathBuf>,
+    parent_lock_held: bool,
+) -> anyhow::Result<()> {
+    let lifecycle_lock = if parent_lock_held {
+        None
+    } else {
+        Some(acquire_desktop_lifecycle_lock_in_optional_dir(
+            &install_dir,
+            lock_dir.as_deref(),
+        )?)
+    };
+    if let Some(lifecycle_lock) = &lifecycle_lock {
+        hold_desktop_lifecycle_lock(lifecycle_lock);
+    }
+    if let Ok(cli_path) = service::find_easytier_cli(&install_dir) {
+        service::uninstall_service_quiet(&cli_path).await?;
+    }
+    if purge {
+        purge_desktop_install(&install_dir, lock_dir.as_deref())?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn run_desktop_uninstall(
+    install_dir: Option<PathBuf>,
+    purge: bool,
+    emit: DesktopEventEmitter<'_>,
+) -> anyhow::Result<()> {
+    let install_dir = install_dir.unwrap_or_else(default_install_dir);
+    let lifecycle_lock = acquire_desktop_lifecycle_lock(&install_dir)?;
+    hold_desktop_lifecycle_lock(&lifecycle_lock);
+    emit(
+        "started",
+        serde_json::json!({
+            "install_dir": install_dir.to_string_lossy(),
+            "purge": purge,
+        }),
+    )?;
+
+    #[cfg(windows)]
+    if !platform::is_elevated() {
+        let lock_dir = desktop_lifecycle_dir();
+        let install_dir_arg = install_dir.to_string_lossy().to_string();
+        let lock_dir_arg = lock_dir.to_string_lossy().to_string();
+        let mut extra_args = vec!["uninstall-service"];
+        if purge {
+            extra_args.push("--purge");
+        }
+        extra_args.push("--desktop-lock-dir");
+        extra_args.push(&lock_dir_arg);
+        extra_args.push("--desktop-parent-lock-held");
+        extra_args.push("--install-dir");
+        extra_args.push(&install_dir_arg);
+        let status = platform::relaunch_elevated_with_replaced_args_hidden(&extra_args)?;
+        if !status.success() {
+            anyhow::bail!("提权后的卸载进程执行失败，请在管理员窗口中查看详细错误");
+        }
+        emit("service_uninstalled", serde_json::json!({}))?;
+        emit(
+            "finished",
+            serde_json::json!({
+                "install_dir": install_dir.to_string_lossy(),
+                "purged": purge,
+            }),
+        )?;
+        return Ok(());
+    }
+
+    emit("service_uninstalling", serde_json::json!({}))?;
+    if let Ok(cli_path) = service::find_easytier_cli(&install_dir) {
+        service::uninstall_service_quiet(&cli_path).await?;
+    }
+    emit("service_uninstalled", serde_json::json!({}))?;
+
+    if purge {
+        purge_desktop_install(&install_dir, None)?;
+    }
+
+    emit(
+        "finished",
+        serde_json::json!({
+            "install_dir": install_dir.to_string_lossy(),
+            "purged": purge,
+        }),
+    )?;
+
+    Ok(())
+}
+
+fn purge_desktop_install(install_dir: &Path, active_lock_dir: Option<&Path>) -> anyhow::Result<()> {
+    ensure_desktop_purge_safe(install_dir, active_lock_dir)?;
+    service::remove_install_dir(install_dir)?;
+    service::remove_cache_dir(&platform::default_cache_dir())
+}
+
+async fn download_with_desktop_events(
+    platform: &platform::Platform,
+    install_dir: &Path,
+    version: &str,
+    emit: DesktopEventEmitter<'_>,
+) -> anyhow::Result<(PathBuf, PathBuf, String)> {
+    download_with_desktop_events_to_dir(platform, install_dir, install_dir, version, emit).await
+}
+
+async fn download_with_desktop_events_to_dir(
+    platform: &platform::Platform,
+    download_dir: &Path,
+    event_install_dir: &Path,
+    version: &str,
+    emit: DesktopEventEmitter<'_>,
+) -> anyhow::Result<(PathBuf, PathBuf, String)> {
+    let version = download::normalize_version(version);
+    emit(
+        "download_started",
+        serde_json::json!({
+            "version": version,
+            "install_dir": event_install_dir.to_string_lossy(),
+            "cache_dir": platform::default_cache_dir().to_string_lossy(),
+        }),
+    )?;
+
+    let result = {
+        let mut progress = |progress: download::DownloadProgress| {
+            emit(
+                "download_progress",
+                serde_json::json!({
+                    "downloaded": progress.downloaded,
+                    "total": progress.total,
+                }),
+            )
+        };
+        download::download_easytier_with_fallback_report(
+            platform,
+            download_dir,
+            &version,
+            &mut progress,
+        )
+        .await?
+    };
+
+    emit(
+        "download_finished",
+        serde_json::json!({
+            "version": result.2,
+            "core_path": event_install_dir.join(core_binary_name()).to_string_lossy(),
+            "cli_path": event_install_dir.join(cli_binary_name()).to_string_lossy(),
+        }),
+    )?;
+
+    Ok(result)
+}
+
+async fn prepare_desktop_update_package_with_events(
+    platform: &platform::Platform,
+    install_dir: &Path,
+    version: &str,
+    emit: DesktopEventEmitter<'_>,
+) -> anyhow::Result<DesktopPreparedUpdate> {
+    let staging_dir = desktop_update_staging_dir(install_dir);
+    remove_existing_staging_dir(&staging_dir)?;
+    let (_, _, installed_version) =
+        download_with_desktop_events_to_dir(platform, &staging_dir, install_dir, version, emit)
+            .await?;
+    Ok(DesktopPreparedUpdate {
+        staging_dir,
+        version: installed_version,
+    })
+}
+
+async fn prepare_desktop_update_package_quiet(
+    platform: &platform::Platform,
+    install_dir: &Path,
+    version: &str,
+) -> anyhow::Result<DesktopPreparedUpdate> {
+    let staging_dir = desktop_update_staging_dir(install_dir);
+    remove_existing_staging_dir(&staging_dir)?;
+    let mut ignore_progress = |_progress: download::DownloadProgress| Ok(());
+    let (_, _, installed_version) = download::download_easytier_with_fallback_report(
+        platform,
+        &staging_dir,
+        version,
+        &mut ignore_progress,
+    )
+    .await?;
+    Ok(DesktopPreparedUpdate {
+        staging_dir,
+        version: installed_version,
+    })
+}
+
+fn desktop_update_staging_dir(install_dir: &Path) -> PathBuf {
+    install_dir.join(".desktop-update-tmp")
+}
+
+fn remove_existing_staging_dir(staging_dir: &Path) -> anyhow::Result<()> {
+    if staging_dir.exists() {
+        std::fs::remove_dir_all(staging_dir)?;
+    }
+    Ok(())
+}
+
+fn install_prepared_desktop_update(
+    package: &DesktopPreparedUpdate,
+    install_dir: &Path,
+) -> anyhow::Result<(PathBuf, PathBuf)> {
+    download::sync_dir_contents(&package.staging_dir, install_dir)?;
+    let core_path = install_dir.join(core_binary_name());
+    let cli_path = install_dir.join(cli_binary_name());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&core_path, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(&cli_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok((core_path, cli_path))
+}
+
+async fn restart_existing_service_after_failed_update(
+    install_dir: &Path,
+    fallback_cli_path: &Path,
+) {
+    let cli_path =
+        service::find_easytier_cli(install_dir).unwrap_or_else(|_| fallback_cli_path.to_path_buf());
+    let _ = start_service_strict(&cli_path).await;
+}
+
+async fn stop_service_for_update(cli_path: &Path) -> anyhow::Result<()> {
+    let stop = tokio::process::Command::new(cli_path)
+        .args(["service", "--name", service::SERVICE_NAME, "stop"])
+        .output()
+        .await?;
+    if stop.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&stop.stderr);
+    if stderr.contains("already stopped") || stderr.contains("Service is stopped") {
+        Ok(())
+    } else {
+        anyhow::bail!("停止服务失败，无法继续升级")
+    }
+}
+
+async fn start_service_strict(cli_path: &Path) -> anyhow::Result<()> {
+    let start = tokio::process::Command::new(cli_path)
+        .args(["service", "--name", service::SERVICE_NAME, "start"])
+        .output()
+        .await?;
+    if start.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&start.stderr);
+    if stderr.contains("already running") {
+        Ok(())
+    } else {
+        anyhow::bail!("启动服务失败: {}", stderr.trim())
+    }
+}
+
 pub(crate) async fn run_upgrade_from_console(
     install_dir: &Path,
     release: &LatestReleaseResponse,
@@ -592,5 +1264,39 @@ fn print_device_name(device: &DeviceSummary, machine_id: &str) {
         crate::style::ok_kv("设备名称:", name);
     } else {
         crate::style::ok_kv("设备名称:", machine_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_purge_rejects_lock_directory_ancestor() {
+        let lock_parent = desktop_lifecycle_dir()
+            .parent()
+            .expect("lock dir has parent")
+            .to_path_buf();
+
+        let err = ensure_desktop_purge_safe(&lock_parent, None).unwrap_err();
+
+        assert!(err.to_string().contains("生命周期锁目录"));
+    }
+
+    #[test]
+    fn desktop_lifecycle_lock_excludes_concurrent_acquisition() {
+        let lock_dir =
+            std::env::temp_dir().join(format!("easytier-lock-test-{}", uuid::Uuid::new_v4()));
+        let install_dir = std::env::temp_dir().join("easytier-lock-test");
+        let first = acquire_desktop_lifecycle_lock_in(&lock_dir, &install_dir).expect("first lock");
+
+        let err = acquire_desktop_lifecycle_lock_in(&lock_dir, &install_dir).unwrap_err();
+        assert!(err.to_string().contains("正在运行"));
+
+        drop(first);
+        let second =
+            acquire_desktop_lifecycle_lock_in(&lock_dir, &install_dir).expect("lock after drop");
+        drop(second);
+        let _ = std::fs::remove_dir_all(lock_dir);
     }
 }

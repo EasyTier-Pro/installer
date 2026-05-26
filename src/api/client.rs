@@ -250,7 +250,7 @@ impl ConsoleClient {
         crate::style::debug(&format!("API 响应 [{}]: {}", status, text));
 
         if !status.is_success() {
-            anyhow::bail!("请求失败: {}", text)
+            anyhow::bail!("请求失败 ({}): {}", status, text)
         }
 
         Ok(serde_json::from_str(&text)?)
@@ -338,7 +338,7 @@ impl ConsoleClient {
         crate::style::debug(&format!("API 公共响应 [{}]: {}", status, text));
 
         if !status.is_success() {
-            anyhow::bail!("请求失败: {}", text)
+            anyhow::bail!("请求失败 ({}): {}", status, text)
         }
 
         Ok(serde_json::from_str(&text)?)

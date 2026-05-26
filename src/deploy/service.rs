@@ -2,10 +2,30 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const SERVICE_NAME: &str = "easytier-pro";
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct CoreServiceConfig<'a> {
+    config_server: &'a str,
+    secure_mode: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    machine_id: Option<&'a str>,
+}
+
 pub(crate) fn service_not_installed(output: &std::process::Output) -> bool {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    stdout.contains("Service is not installed") || stderr.contains("Service is not installed")
+    service_not_installed_text(&stdout, &stderr)
+}
+
+fn service_not_installed_text(stdout: &str, stderr: &str) -> bool {
+    stdout.contains("Service is not installed")
+        || stderr.contains("Service is not installed")
+        || stdout.contains("1060")
+        || stderr.contains("1060")
+        || stdout.contains("does not exist as an installed service")
+        || stderr.contains("does not exist as an installed service")
+        || stdout.contains("指定的服务未安装")
+        || stderr.contains("指定的服务未安装")
 }
 
 pub(crate) fn service_stopped_after_uninstall(output: &std::process::Output) -> bool {
@@ -18,12 +38,7 @@ pub(crate) fn service_stopped_after_uninstall(output: &std::process::Output) -> 
 fn service_missing_in_sc(output: &std::process::Output) -> bool {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    stdout.contains("1060")
-        || stderr.contains("1060")
-        || stdout.contains("does not exist as an installed service")
-        || stderr.contains("does not exist as an installed service")
-        || stdout.contains("指定的服务未安装")
-        || stderr.contains("指定的服务未安装")
+    service_not_installed_text(&stdout, &stderr)
 }
 
 pub(crate) async fn service_is_installed(cli_path: &Path) -> bool {
@@ -117,6 +132,25 @@ pub(crate) async fn install_service(
     config_url: &str,
     machine_id: Option<&str>,
 ) -> anyhow::Result<()> {
+    install_service_impl(cli_path, core_path, config_url, machine_id, false).await
+}
+
+pub(crate) async fn install_service_quiet(
+    cli_path: &Path,
+    core_path: &Path,
+    config_url: &str,
+    machine_id: Option<&str>,
+) -> anyhow::Result<()> {
+    install_service_impl(cli_path, core_path, config_url, machine_id, true).await
+}
+
+async fn install_service_impl(
+    cli_path: &Path,
+    core_path: &Path,
+    config_url: &str,
+    machine_id: Option<&str>,
+    quiet: bool,
+) -> anyhow::Result<()> {
     if let Ok(status) = tokio::process::Command::new(cli_path)
         .args(["service", "--name", SERVICE_NAME, "status"])
         .output()
@@ -138,11 +172,19 @@ pub(crate) async fn install_service(
         "--core-path".to_string(),
         core_path.to_string_lossy().to_string(),
         "--".to_string(),
-        "--config-server".to_string(),
-        config_url.to_string(),
-        "--secure-mode=true".to_string(),
     ];
-    if let Some(mid) = machine_id {
+
+    if quiet {
+        let config_file = write_core_service_config(core_path, config_url, machine_id)?;
+        args.push("--config-file".to_string());
+        args.push(config_file.to_string_lossy().to_string());
+    } else {
+        args.push("--config-server".to_string());
+        args.push(config_url.to_string());
+        args.push("--secure-mode=true".to_string());
+    }
+
+    if !quiet && let Some(mid) = machine_id {
         args.push("--machine-id".to_string());
         args.push(mid.to_string());
     }
@@ -153,12 +195,16 @@ pub(crate) async fn install_service(
         .await?;
 
     if output.status.success() {
-        crate::style::kv("服务名:", SERVICE_NAME);
-        crate::style::kv("程序路径:", &core_path.to_string_lossy());
-        crate::style::kv("配置服务器:", config_url);
+        if !quiet {
+            crate::style::kv("服务名:", SERVICE_NAME);
+            crate::style::kv("程序路径:", &core_path.to_string_lossy());
+            crate::style::kv("配置服务器:", config_url);
+        }
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("{}", stderr);
+        if !quiet {
+            eprintln!("{}", stderr);
+        }
         if stderr.contains("permission")
             || stderr.contains("Permission")
             || stderr.contains("Access")
@@ -175,21 +221,106 @@ pub(crate) async fn install_service(
 
     if start.status.success() {
         let stdout = String::from_utf8_lossy(&start.stdout);
-        if !stdout.trim().is_empty() {
+        if !quiet && !stdout.trim().is_empty() {
             println!("  {}", stdout.trim());
         }
-        crate::style::success("服务已安装并启动");
+        if !quiet {
+            crate::style::success("服务已安装并启动");
+        }
     } else {
         let stderr = String::from_utf8_lossy(&start.stderr);
         if stderr.contains("already running") {
-            crate::style::success("服务已安装并启动");
-        } else {
+            if !quiet {
+                crate::style::success("服务已安装并启动");
+            }
+        } else if quiet {
+            anyhow::bail!("启动服务失败: {}", stderr.trim());
+        } else if !quiet {
             println!("  {}", stderr.trim());
             crate::style::warning("服务已安装但启动失败，您可以稍后手动启动");
         }
     }
 
     Ok(())
+}
+
+fn write_core_service_config(
+    core_path: &Path,
+    config_url: &str,
+    machine_id: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    let install_dir = core_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("无法确定 easytier-core 所在目录"))?;
+    std::fs::create_dir_all(install_dir)?;
+    let config_path = install_dir.join("easytier-core-service.toml");
+    let contents = core_service_config_toml(config_url, machine_id)?;
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&config_path)?;
+        file.write_all(contents.as_bytes())?;
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    #[cfg(windows)]
+    {
+        std::fs::write(&config_path, contents)?;
+        restrict_sensitive_file_permissions(&config_path)?;
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::fs::write(&config_path, contents)?;
+    }
+
+    Ok(config_path)
+}
+
+#[cfg(windows)]
+pub(crate) fn restrict_sensitive_file_permissions(config_path: &Path) -> anyhow::Result<()> {
+    let output = std::process::Command::new("icacls")
+        .arg(config_path)
+        .args(windows_service_config_acl_args())
+        .output()
+        .map_err(|err| {
+            let _ = std::fs::remove_file(config_path);
+            anyhow::anyhow!("收紧服务配置文件权限失败: {}", err)
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = std::fs::remove_file(config_path);
+        anyhow::bail!("收紧服务配置文件权限失败: {}", stderr.trim());
+    }
+
+    Ok(())
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn windows_service_config_acl_args() -> [&'static str; 4] {
+    [
+        "/inheritance:r",
+        "/grant:r",
+        "*S-1-5-18:F",
+        "*S-1-5-32-544:F",
+    ]
+}
+
+fn core_service_config_toml(config_url: &str, machine_id: Option<&str>) -> anyhow::Result<String> {
+    Ok(toml::to_string(&CoreServiceConfig {
+        config_server: config_url,
+        secure_mode: true,
+        machine_id,
+    })?)
 }
 
 pub(crate) fn find_easytier_cli(install_dir: &Path) -> anyhow::Result<PathBuf> {
@@ -293,7 +424,17 @@ pub async fn run_uninstall(install_dir: Option<PathBuf>, purge: bool) -> anyhow:
 }
 
 pub(crate) async fn uninstall_service(cli_path: &Path) -> anyhow::Result<()> {
-    crate::style::info("正在卸载服务...");
+    uninstall_service_impl(cli_path, false).await
+}
+
+pub(crate) async fn uninstall_service_quiet(cli_path: &Path) -> anyhow::Result<()> {
+    uninstall_service_impl(cli_path, true).await
+}
+
+async fn uninstall_service_impl(cli_path: &Path, quiet: bool) -> anyhow::Result<()> {
+    if !quiet {
+        crate::style::info("正在卸载服务...");
+    }
 
     let stop_output = tokio::process::Command::new(cli_path)
         .args(["service", "--name", SERVICE_NAME, "stop"])
@@ -352,7 +493,9 @@ pub(crate) async fn uninstall_service(cli_path: &Path) -> anyhow::Result<()> {
         }
         if !stderr.trim().is_empty() {
             crate::style::debug(&format!("uninstall stderr={}", stderr.trim()));
-            eprintln!("{}", stderr.trim());
+            if !quiet {
+                eprintln!("{}", stderr.trim());
+            }
         }
         anyhow::bail!("卸载服务失败");
     }
@@ -376,7 +519,9 @@ pub(crate) async fn uninstall_service(cli_path: &Path) -> anyhow::Result<()> {
         } else if service_stopped_after_uninstall(&v) {
             crate::style::debug("verify 返回 Service is stopped，服务已卸载");
         } else {
-            crate::style::warning("卸载未生效，服务仍然存在");
+            if !quiet {
+                crate::style::warning("卸载未生效，服务仍然存在");
+            }
             anyhow::bail!("卸载未生效，请手动检查 easytier 进程");
         }
     } else {
@@ -422,4 +567,51 @@ pub(crate) fn remove_cache_dir(cache_dir: &Path) -> anyhow::Result<()> {
 
     crate::style::debug(&format!("缓存目录删除完成: {}", cache_dir.display()));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_service_config_uses_easytier_kebab_case_keys() {
+        let toml = core_service_config_toml(
+            "tcp://console.easytier.cn:22020/bootstrap-token",
+            Some("machine-id"),
+        )
+        .expect("config toml");
+
+        assert!(toml.contains("config-server = "));
+        assert!(toml.contains("secure-mode = true"));
+        assert!(toml.contains("machine-id = "));
+        assert!(!toml.contains("config_server"));
+        assert!(!toml.contains("secure_mode"));
+        assert!(!toml.contains("machine_id"));
+    }
+
+    #[test]
+    fn detects_windows_service_missing_messages() {
+        assert!(service_not_installed_text(
+            "[SC] EnumQueryServicesStatus:OpenService FAILED 1060:",
+            "",
+        ));
+        assert!(service_not_installed_text(
+            "",
+            "The specified service does not exist as an installed service.",
+        ));
+        assert!(service_not_installed_text("", "指定的服务未安装"));
+    }
+
+    #[test]
+    fn windows_service_config_acl_uses_sids() {
+        assert_eq!(
+            windows_service_config_acl_args(),
+            [
+                "/inheritance:r",
+                "/grant:r",
+                "*S-1-5-18:F",
+                "*S-1-5-32-544:F",
+            ]
+        );
+    }
 }
