@@ -43,7 +43,7 @@ pub enum Command {
     Status,
 
     /// 面向桌面端的 JSON 子进程协议
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Desktop(DesktopCommand),
 
     #[command(name = "install-service", hide = true)]
@@ -401,7 +401,7 @@ fn is_unauthorized_error(err: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn parses_without_subcommand_as_default_install() {
@@ -468,6 +468,17 @@ mod tests {
             panic!("expected desktop install command");
         };
         assert!(args.json);
+    }
+
+    #[test]
+    fn hides_desktop_subcommand_from_help() {
+        let help = Cli::command().render_help().to_string();
+
+        assert!(!help.contains("\n  desktop"));
+        assert!(help.contains("\n  install    安装并完成首次部署"));
+        assert!(help.contains("\n  update     更新已安装的 EasyTier"));
+        assert!(help.contains("\n  uninstall  卸载 EasyTier 服务"));
+        assert!(help.contains("\n  status     查看服务状态"));
     }
 
     #[test]
