@@ -1,6 +1,16 @@
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const SERVICE_NAME: &str = "easytier-pro";
+
+#[derive(Debug, Clone)]
+pub(crate) struct BootstrapFingerprint {
+    pub value: String,
+    pub algo: &'static str,
+    pub source: &'static str,
+    pub updated_at_unix: Option<u64>,
+}
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -347,6 +357,62 @@ pub(crate) fn get_core_version(core_path: &Path) -> Option<String> {
     stdout.split_whitespace().nth(1).map(|s| s.to_string())
 }
 
+pub(crate) fn bootstrap_fingerprint(install_dir: &Path) -> Option<BootstrapFingerprint> {
+    let config_path = install_dir.join("easytier-core-service.toml");
+    let contents = std::fs::read_to_string(&config_path).ok()?;
+    let config_server = find_config_server_field(&contents)?;
+    let token = extract_bootstrap_token(&config_server)?;
+    let value = hash_bootstrap_token(token);
+    let updated_at_unix = std::fs::metadata(&config_path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(system_time_to_unix_seconds);
+
+    Some(BootstrapFingerprint {
+        value,
+        algo: "sha256:16",
+        source: "service_config",
+        updated_at_unix,
+    })
+}
+
+fn find_config_server_field(contents: &str) -> Option<String> {
+    let parsed = contents.parse::<toml::Value>().ok()?;
+    parsed
+        .get("config-server")
+        .or_else(|| parsed.get("config_server"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_string)
+}
+
+fn extract_bootstrap_token(config_server: &str) -> Option<&str> {
+    let trimmed = config_server.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let token = trimmed.rsplit('/').next()?;
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
+}
+
+fn hash_bootstrap_token(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    let mut out = String::with_capacity(32);
+    for byte in &digest[..16] {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+fn system_time_to_unix_seconds(value: SystemTime) -> Option<u64> {
+    value.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
+}
+
 pub async fn run_status(install_dir: Option<PathBuf>) -> anyhow::Result<()> {
     let install_dir = install_dir.unwrap_or_else(super::platform::default_install_dir);
     let cli_path = find_easytier_cli(&install_dir)?;
@@ -612,6 +678,32 @@ mod tests {
                 "*S-1-5-18:F",
                 "*S-1-5-32-544:F",
             ]
+        );
+    }
+
+    #[test]
+    fn extracts_bootstrap_token_from_config_server() {
+        assert_eq!(
+            extract_bootstrap_token("tcp://console.easytier.net:22020/bootstrap-token"),
+            Some("bootstrap-token")
+        );
+        assert_eq!(
+            extract_bootstrap_token("tcp://console.easytier.net:22020/bootstrap-token/"),
+            Some("bootstrap-token")
+        );
+        assert_eq!(extract_bootstrap_token(""), None);
+    }
+
+    #[test]
+    fn finds_config_server_field_in_service_toml() {
+        let toml = r#"
+config-server = "tcp://console.easytier.net:22020/bootstrap-token"
+secure-mode = true
+"#;
+
+        assert_eq!(
+            find_config_server_field(toml),
+            Some("tcp://console.easytier.net:22020/bootstrap-token".to_string())
         );
     }
 }

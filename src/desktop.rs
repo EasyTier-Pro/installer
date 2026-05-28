@@ -116,6 +116,7 @@ async fn local_status(install_dir: &Path) -> serde_json::Value {
         None
     };
     let machine_id = read_machine_id(install_dir);
+    let bootstrap_fingerprint = service::bootstrap_fingerprint(install_dir);
     let service_state = if cli_exists {
         query_service_state(&cli_path).await
     } else {
@@ -130,6 +131,10 @@ async fn local_status(install_dir: &Path) -> serde_json::Value {
         "cli_path": cli_path.to_string_lossy(),
         "version": version,
         "machine_id": machine_id,
+        "current_bootstrap_fingerprint": bootstrap_fingerprint.as_ref().map(|value| value.value.clone()),
+        "fingerprint_algo": bootstrap_fingerprint.as_ref().map(|value| value.algo),
+        "fingerprint_source": bootstrap_fingerprint.as_ref().map(|value| value.source),
+        "last_config_update_at": bootstrap_fingerprint.and_then(|value| value.updated_at_unix),
         "service_installed": service_state.installed,
         "service_running": service_state.running,
         "service_status_success": service_state.status_success,
