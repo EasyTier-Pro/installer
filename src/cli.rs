@@ -128,9 +128,6 @@ pub struct UninstallServiceArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum DesktopCommand {
-    /// 查看本机 EasyTier 服务状态
-    Status(DesktopJsonArgs),
-
     /// 非交互安装并启动 EasyTier 服务
     Install(DesktopJsonArgs),
 

@@ -376,6 +376,10 @@ pub(crate) fn bootstrap_fingerprint(install_dir: &Path) -> Option<BootstrapFinge
     })
 }
 
+pub(crate) fn bootstrap_fingerprint_for_token(token: &str) -> String {
+    hash_bootstrap_token(token)
+}
+
 fn find_config_server_field(contents: &str) -> Option<String> {
     let parsed = contents.parse::<toml::Value>().ok()?;
     parsed
@@ -584,6 +588,20 @@ async fn uninstall_service_impl(cli_path: &Path, quiet: bool) -> anyhow::Result<
             crate::style::debug("verify 返回 Service is not installed，服务已卸载");
         } else if service_stopped_after_uninstall(&v) {
             crate::style::debug("verify 返回 Service is stopped，服务已卸载");
+        } else if !v.status.success() {
+            let verify_stderr = String::from_utf8_lossy(&v.stderr).to_lowercase();
+            if verify_stderr.contains("access is denied")
+                || verify_stderr.contains("permission")
+                || verify_stderr.contains("拒绝访问")
+            {
+                crate::style::debug("verify 返回权限受限，按卸载成功处理");
+                return Ok(());
+            }
+            if !quiet {
+                crate::style::warning("卸载后状态探测失败，按卸载成功处理");
+            }
+            crate::style::debug("verify 探测失败，按卸载成功处理");
+            return Ok(());
         } else {
             if !quiet {
                 crate::style::warning("卸载未生效，服务仍然存在");

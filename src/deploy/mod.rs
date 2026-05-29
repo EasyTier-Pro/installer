@@ -597,6 +597,9 @@ pub(crate) async fn run_desktop_install(
         config_server.trim_end_matches('/'),
         bootstrap_token
     );
+    let expected_fingerprint = service::bootstrap_fingerprint_for_token(&bootstrap_token);
+    let existing_fingerprint = service::bootstrap_fingerprint(&install_dir).map(|v| v.value);
+    let normalized_version = download::normalize_version(&version);
 
     let platform = platform::detect_platform()?;
     emit(
@@ -607,14 +610,118 @@ pub(crate) async fn run_desktop_install(
         }),
     )?;
 
+    let existing_core_path = install_dir.join(core_binary_name());
+    let existing_cli_path = install_dir.join(cli_binary_name());
+    let binaries_present = existing_core_path.exists() && existing_cli_path.exists();
+    let existing_version = if binaries_present {
+        service::get_core_version(&existing_core_path)
+    } else {
+        None
+    };
+    let identity_match = existing_fingerprint.as_deref() == Some(expected_fingerprint.as_str());
+
+    emit(
+        "identity_evaluated",
+        serde_json::json!({
+            "identity_match": identity_match,
+            "binaries_present": binaries_present,
+            "installed_version": existing_version.clone(),
+            "target_version": normalized_version.clone(),
+        }),
+    )?;
+
+    if identity_match
+        && binaries_present
+        && existing_version.as_deref() == Some(normalized_version.as_str())
+    {
+        emit(
+            "service_installing",
+            serde_json::json!({
+                "mode": "reuse_existing",
+            }),
+        )?;
+        ensure_desktop_service_running(
+            &install_dir,
+            &existing_core_path,
+            &existing_cli_path,
+            &full_config_url,
+            &machine_id,
+        )
+        .await?;
+        emit(
+            "service_started",
+            serde_json::json!({
+                "service_name": service::SERVICE_NAME,
+                "reused": true,
+            }),
+        )?;
+        emit(
+            "finished",
+            serde_json::json!({
+                "machine_id": machine_id,
+                "install_dir": install_dir.to_string_lossy(),
+                "core_path": existing_core_path.to_string_lossy(),
+                "cli_path": existing_cli_path.to_string_lossy(),
+                "version": normalized_version,
+                "reused": true,
+            }),
+        )?;
+        return Ok(());
+    }
+
     let (core_path, cli_path, installed_version) =
-        download_with_desktop_events(&platform, &install_dir, &version, emit).await?;
+        download_with_desktop_events(&platform, &install_dir, &normalized_version, emit).await?;
 
     emit("service_installing", serde_json::json!({}))?;
+    install_desktop_service(&install_dir, &core_path, &cli_path, &full_config_url, &machine_id)
+        .await?;
+    emit(
+        "service_started",
+        serde_json::json!({
+            "service_name": service::SERVICE_NAME,
+            "reused": false,
+        }),
+    )?;
+
+    emit(
+        "finished",
+        serde_json::json!({
+            "machine_id": machine_id,
+            "install_dir": install_dir.to_string_lossy(),
+            "core_path": core_path.to_string_lossy(),
+            "cli_path": cli_path.to_string_lossy(),
+            "version": installed_version,
+            "reused": false,
+        }),
+    )?;
+
+    Ok(())
+}
+
+async fn ensure_desktop_service_running(
+    install_dir: &Path,
+    core_path: &Path,
+    cli_path: &Path,
+    full_config_url: &str,
+    machine_id: &str,
+) -> anyhow::Result<()> {
+    if start_service_strict(cli_path).await.is_ok() {
+        return Ok(());
+    }
+    install_desktop_service(install_dir, core_path, cli_path, full_config_url, machine_id).await
+}
+
+async fn install_desktop_service(
+    install_dir: &Path,
+    core_path: &Path,
+    cli_path: &Path,
+    full_config_url: &str,
+    machine_id: &str,
+) -> anyhow::Result<()> {
     #[cfg(windows)]
     if !platform::is_elevated() {
         let lock_dir = desktop_lifecycle_dir();
-        let service_config = DesktopSecretFile::create(&full_config_url)?;
+        let service_config = DesktopSecretFile::create(full_config_url)?;
         let core_path_str = core_path.to_string_lossy().to_string();
         let install_dir_str = install_dir.to_string_lossy().to_string();
         let service_config_path = service_config.path.to_string_lossy().to_string();
@@ -634,41 +741,24 @@ pub(crate) async fn run_desktop_install(
         ];
         if !machine_id.is_empty() {
             extra_args.push("--service-machine-id");
-            extra_args.push(&machine_id);
+            extra_args.push(machine_id);
         }
         let status = platform::relaunch_elevated_with_replaced_args_hidden(&extra_args)?;
         if !status.success() {
             anyhow::bail!("提权后的安装服务进程执行失败，请在管理员窗口中查看详细错误");
         }
-    } else {
-        service::install_service_quiet(&cli_path, &core_path, &full_config_url, Some(&machine_id))
-            .await?;
+        return Ok(());
+    }
+
+    #[cfg(windows)]
+    {
+        service::install_service_quiet(cli_path, core_path, full_config_url, Some(machine_id)).await
     }
 
     #[cfg(not(windows))]
     {
-        service::install_service_quiet(&cli_path, &core_path, &full_config_url, Some(&machine_id))
-            .await?;
+        service::install_service_quiet(cli_path, core_path, full_config_url, Some(machine_id)).await
     }
-    emit(
-        "service_started",
-        serde_json::json!({
-            "service_name": service::SERVICE_NAME,
-        }),
-    )?;
-
-    emit(
-        "finished",
-        serde_json::json!({
-            "machine_id": machine_id,
-            "install_dir": install_dir.to_string_lossy(),
-            "core_path": core_path.to_string_lossy(),
-            "cli_path": cli_path.to_string_lossy(),
-            "version": installed_version,
-        }),
-    )?;
-
-    Ok(())
 }
 
 pub(crate) async fn run_desktop_install_service(
