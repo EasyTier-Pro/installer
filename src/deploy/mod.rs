@@ -598,7 +598,7 @@ pub(crate) async fn run_desktop_install(
         bootstrap_token
     );
     let expected_fingerprint = service::bootstrap_fingerprint_for_token(&bootstrap_token);
-    let existing_fingerprint = service::bootstrap_fingerprint(&install_dir).map(|v| v.value);
+    let existing_fingerprint = service::bootstrap_fingerprint(&install_dir);
     let normalized_version = download::normalize_version(&version);
 
     let platform = platform::detect_platform()?;
@@ -673,8 +673,14 @@ pub(crate) async fn run_desktop_install(
         download_with_desktop_events(&platform, &install_dir, &normalized_version, emit).await?;
 
     emit("service_installing", serde_json::json!({}))?;
-    install_desktop_service(&install_dir, &core_path, &cli_path, &full_config_url, &machine_id)
-        .await?;
+    install_desktop_service(
+        &install_dir,
+        &core_path,
+        &cli_path,
+        &full_config_url,
+        &machine_id,
+    )
+    .await?;
     emit(
         "service_started",
         serde_json::json!({
@@ -708,7 +714,14 @@ async fn ensure_desktop_service_running(
     if start_service_strict(cli_path).await.is_ok() {
         return Ok(());
     }
-    install_desktop_service(install_dir, core_path, cli_path, full_config_url, machine_id).await
+    install_desktop_service(
+        install_dir,
+        core_path,
+        cli_path,
+        full_config_url,
+        machine_id,
+    )
+    .await
 }
 
 async fn install_desktop_service(

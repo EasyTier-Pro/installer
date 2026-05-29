@@ -1,16 +1,9 @@
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const SERVICE_NAME: &str = "easytier-pro";
 
-#[derive(Debug, Clone)]
-pub(crate) struct BootstrapFingerprint {
-    pub value: String,
-    pub algo: &'static str,
-    pub source: &'static str,
-    pub updated_at_unix: Option<u64>,
-}
+pub(crate) type BootstrapFingerprint = String;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -362,18 +355,7 @@ pub(crate) fn bootstrap_fingerprint(install_dir: &Path) -> Option<BootstrapFinge
     let contents = std::fs::read_to_string(&config_path).ok()?;
     let config_server = find_config_server_field(&contents)?;
     let token = extract_bootstrap_token(&config_server)?;
-    let value = hash_bootstrap_token(token);
-    let updated_at_unix = std::fs::metadata(&config_path)
-        .ok()
-        .and_then(|meta| meta.modified().ok())
-        .and_then(system_time_to_unix_seconds);
-
-    Some(BootstrapFingerprint {
-        value,
-        algo: "sha256:16",
-        source: "service_config",
-        updated_at_unix,
-    })
+    Some(hash_bootstrap_token(token))
 }
 
 pub(crate) fn bootstrap_fingerprint_for_token(token: &str) -> String {
@@ -396,11 +378,7 @@ fn extract_bootstrap_token(config_server: &str) -> Option<&str> {
     }
 
     let token = trimmed.rsplit('/').next()?;
-    if token.is_empty() {
-        None
-    } else {
-        Some(token)
-    }
+    if token.is_empty() { None } else { Some(token) }
 }
 
 fn hash_bootstrap_token(token: &str) -> String {
@@ -411,10 +389,6 @@ fn hash_bootstrap_token(token: &str) -> String {
         let _ = write!(&mut out, "{byte:02x}");
     }
     out
-}
-
-fn system_time_to_unix_seconds(value: SystemTime) -> Option<u64> {
-    value.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
 pub async fn run_status(install_dir: Option<PathBuf>) -> anyhow::Result<()> {
