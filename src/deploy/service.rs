@@ -259,48 +259,6 @@ fn write_bootstrap_fingerprint(core_path: &Path, config_url: &str) -> anyhow::Re
     Ok(())
 }
 
-#[allow(dead_code)]
-fn write_core_service_config(
-    core_path: &Path,
-    config_url: &str,
-    machine_id: Option<&str>,
-) -> anyhow::Result<PathBuf> {
-    let install_dir = core_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("无法确定 easytier-core 所在目录"))?;
-    std::fs::create_dir_all(install_dir)?;
-    let config_path = install_dir.join("easytier-core-service.toml");
-    let contents = core_service_config_toml(config_url, machine_id)?;
-
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&config_path)?;
-        file.write_all(contents.as_bytes())?;
-        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-
-    #[cfg(windows)]
-    {
-        std::fs::write(&config_path, contents)?;
-        restrict_sensitive_file_permissions(&config_path)?;
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        std::fs::write(&config_path, contents)?;
-    }
-
-    Ok(config_path)
-}
-
 #[cfg(windows)]
 pub(crate) fn restrict_sensitive_file_permissions(config_path: &Path) -> anyhow::Result<()> {
     let output = std::process::Command::new("icacls")
@@ -329,22 +287,6 @@ fn windows_service_config_acl_args() -> [&'static str; 4] {
         "*S-1-5-18:F",
         "*S-1-5-32-544:F",
     ]
-}
-
-fn core_service_config_toml(config_url: &str, machine_id: Option<&str>) -> anyhow::Result<String> {
-    let mut config = toml::map::Map::new();
-    config.insert(
-        "config-server".to_string(),
-        toml::Value::String(config_url.to_string()),
-    );
-    config.insert("secure-mode".to_string(), toml::Value::Boolean(true));
-    if let Some(machine_id) = machine_id {
-        config.insert(
-            "machine-id".to_string(),
-            toml::Value::String(machine_id.to_string()),
-        );
-    }
-    Ok(toml::to_string(&toml::Value::Table(config))?)
 }
 
 pub(crate) fn find_easytier_cli(install_dir: &Path) -> anyhow::Result<PathBuf> {
@@ -659,22 +601,6 @@ pub(crate) fn remove_cache_dir(cache_dir: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn core_service_config_uses_easytier_kebab_case_keys() {
-        let toml = core_service_config_toml(
-            "tcp://console.easytier.cn:22020/bootstrap-token",
-            Some("machine-id"),
-        )
-        .expect("config toml");
-
-        assert!(toml.contains("config-server = "));
-        assert!(toml.contains("secure-mode = true"));
-        assert!(toml.contains("machine-id = "));
-        assert!(!toml.contains("config_server"));
-        assert!(!toml.contains("secure_mode"));
-        assert!(!toml.contains("machine_id"));
-    }
 
     #[test]
     fn service_install_args_use_core_cli_flags() {
