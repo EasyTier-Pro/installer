@@ -2,17 +2,10 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 pub(crate) const SERVICE_NAME: &str = "easytier-pro";
+const BOOTSTRAP_FINGERPRINT_FILE: &str = ".bootstrap-fingerprint";
+const LEGACY_CORE_SERVICE_CONFIG_FILE: &str = "easytier-core-service.toml";
 
 pub(crate) type BootstrapFingerprint = String;
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-struct CoreServiceConfig<'a> {
-    config_server: &'a str,
-    secure_mode: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    machine_id: Option<&'a str>,
-}
 
 pub(crate) fn service_not_installed(output: &std::process::Output) -> bool {
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -167,30 +160,8 @@ async fn install_service_impl(
         systemd_daemon_reload().await;
     }
 
-    let mut args = vec![
-        "service".to_string(),
-        "--name".to_string(),
-        SERVICE_NAME.to_string(),
-        "install".to_string(),
-        "--core-path".to_string(),
-        core_path.to_string_lossy().to_string(),
-        "--".to_string(),
-    ];
-
-    if quiet {
-        let config_file = write_core_service_config(core_path, config_url, machine_id)?;
-        args.push("--config-file".to_string());
-        args.push(config_file.to_string_lossy().to_string());
-    } else {
-        args.push("--config-server".to_string());
-        args.push(config_url.to_string());
-        args.push("--secure-mode=true".to_string());
-    }
-
-    if !quiet && let Some(mid) = machine_id {
-        args.push("--machine-id".to_string());
-        args.push(mid.to_string());
-    }
+    write_bootstrap_fingerprint(core_path, config_url)?;
+    let args = service_install_args(core_path, config_url, machine_id);
 
     let output = tokio::process::Command::new(cli_path)
         .args(&args)
@@ -247,6 +218,48 @@ async fn install_service_impl(
     Ok(())
 }
 
+fn service_install_args(
+    core_path: &Path,
+    config_url: &str,
+    machine_id: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        "service".to_string(),
+        "--name".to_string(),
+        SERVICE_NAME.to_string(),
+        "install".to_string(),
+        "--core-path".to_string(),
+        core_path.to_string_lossy().to_string(),
+        "--".to_string(),
+        "--config-server".to_string(),
+        config_url.to_string(),
+        "--secure-mode=true".to_string(),
+    ];
+
+    if let Some(mid) = machine_id {
+        args.push("--machine-id".to_string());
+        args.push(mid.to_string());
+    }
+
+    args
+}
+
+fn write_bootstrap_fingerprint(core_path: &Path, config_url: &str) -> anyhow::Result<()> {
+    let install_dir = core_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("failed to resolve easytier-core install directory"))?;
+    std::fs::create_dir_all(install_dir)?;
+    let token = extract_bootstrap_token(config_url)
+        .ok_or_else(|| anyhow::anyhow!("failed to parse bootstrap token from config server URL"))?;
+    std::fs::write(
+        install_dir.join(BOOTSTRAP_FINGERPRINT_FILE),
+        format!("{}\n", hash_bootstrap_token(token)),
+    )?;
+    let _ = std::fs::remove_file(install_dir.join(LEGACY_CORE_SERVICE_CONFIG_FILE));
+    Ok(())
+}
+
+#[allow(dead_code)]
 fn write_core_service_config(
     core_path: &Path,
     config_url: &str,
@@ -319,11 +332,19 @@ fn windows_service_config_acl_args() -> [&'static str; 4] {
 }
 
 fn core_service_config_toml(config_url: &str, machine_id: Option<&str>) -> anyhow::Result<String> {
-    Ok(toml::to_string(&CoreServiceConfig {
-        config_server: config_url,
-        secure_mode: true,
-        machine_id,
-    })?)
+    let mut config = toml::map::Map::new();
+    config.insert(
+        "config-server".to_string(),
+        toml::Value::String(config_url.to_string()),
+    );
+    config.insert("secure-mode".to_string(), toml::Value::Boolean(true));
+    if let Some(machine_id) = machine_id {
+        config.insert(
+            "machine-id".to_string(),
+            toml::Value::String(machine_id.to_string()),
+        );
+    }
+    Ok(toml::to_string(&toml::Value::Table(config))?)
 }
 
 pub(crate) fn find_easytier_cli(install_dir: &Path) -> anyhow::Result<PathBuf> {
@@ -351,7 +372,15 @@ pub(crate) fn get_core_version(core_path: &Path) -> Option<String> {
 }
 
 pub(crate) fn bootstrap_fingerprint(install_dir: &Path) -> Option<BootstrapFingerprint> {
-    let config_path = install_dir.join("easytier-core-service.toml");
+    let fingerprint_path = install_dir.join(BOOTSTRAP_FINGERPRINT_FILE);
+    if let Ok(contents) = std::fs::read_to_string(&fingerprint_path) {
+        let fingerprint = contents.trim();
+        if !fingerprint.is_empty() {
+            return Some(fingerprint.to_string());
+        }
+    }
+
+    let config_path = install_dir.join(LEGACY_CORE_SERVICE_CONFIG_FILE);
     let contents = std::fs::read_to_string(&config_path).ok()?;
     let config_server = find_config_server_field(&contents)?;
     let token = extract_bootstrap_token(&config_server)?;
@@ -648,6 +677,23 @@ mod tests {
     }
 
     #[test]
+    fn service_install_args_use_core_cli_flags() {
+        let core_path = PathBuf::from(r"C:\EasyTier\easytier-core.exe");
+        let args = service_install_args(
+            &core_path,
+            "tcp://console.easytier.cn:22020/bootstrap-token",
+            Some("machine-id"),
+        );
+
+        assert!(args.contains(&"--config-server".to_string()));
+        assert!(args.contains(&"tcp://console.easytier.cn:22020/bootstrap-token".to_string()));
+        assert!(args.contains(&"--secure-mode=true".to_string()));
+        assert!(args.contains(&"--machine-id".to_string()));
+        assert!(args.contains(&"machine-id".to_string()));
+        assert!(!args.contains(&"--config-file".to_string()));
+    }
+
+    #[test]
     fn detects_windows_service_missing_messages() {
         assert!(service_not_installed_text(
             "[SC] EnumQueryServicesStatus:OpenService FAILED 1060:",
@@ -697,5 +743,46 @@ secure-mode = true
             find_config_server_field(toml),
             Some("tcp://console.easytier.net:22020/bootstrap-token".to_string())
         );
+    }
+
+    #[test]
+    fn bootstrap_fingerprint_prefers_shared_fingerprint_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "easytier-fingerprint-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        std::fs::write(dir.join(BOOTSTRAP_FINGERPRINT_FILE), "persisted\n")
+            .expect("write fingerprint");
+        std::fs::write(
+            dir.join(LEGACY_CORE_SERVICE_CONFIG_FILE),
+            r#"config-server = "tcp://console.easytier.net:22020/legacy-token""#,
+        )
+        .expect("write legacy config");
+
+        assert_eq!(bootstrap_fingerprint(&dir), Some("persisted".to_string()));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bootstrap_fingerprint_reads_legacy_service_toml() {
+        let dir = std::env::temp_dir().join(format!(
+            "easytier-legacy-fingerprint-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        std::fs::write(
+            dir.join(LEGACY_CORE_SERVICE_CONFIG_FILE),
+            r#"config-server = "tcp://console.easytier.net:22020/bootstrap-token""#,
+        )
+        .expect("write legacy config");
+
+        assert_eq!(
+            bootstrap_fingerprint(&dir),
+            Some(bootstrap_fingerprint_for_token("bootstrap-token"))
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

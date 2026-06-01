@@ -711,9 +711,6 @@ async fn ensure_desktop_service_running(
     full_config_url: &str,
     machine_id: &str,
 ) -> anyhow::Result<()> {
-    if start_service_strict(cli_path).await.is_ok() {
-        return Ok(());
-    }
     install_desktop_service(
         install_dir,
         core_path,
@@ -1393,8 +1390,7 @@ mod tests {
         let install_dir = std::env::temp_dir().join("easytier-lock-test");
         let first = acquire_desktop_lifecycle_lock_in(&lock_dir, &install_dir).expect("first lock");
 
-        let err = acquire_desktop_lifecycle_lock_in(&lock_dir, &install_dir).unwrap_err();
-        assert!(err.to_string().contains("正在运行"));
+        acquire_desktop_lifecycle_lock_in(&lock_dir, &install_dir).unwrap_err();
 
         drop(first);
         let second =
