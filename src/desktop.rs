@@ -4,12 +4,13 @@ use crate::deploy::{self, platform};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 
 pub(crate) async fn run(cli: Cli, command: DesktopCommand) -> anyhow::Result<()> {
     let result = match command {
         DesktopCommand::Install(args) => run_install(&cli, args).await,
+        DesktopCommand::Status(args) => run_status(&cli, args).await,
         DesktopCommand::Uninstall(args) => run_uninstall(&cli, args).await,
         DesktopCommand::Update(args) => run_update(&cli, args).await,
     };
@@ -34,6 +35,23 @@ async fn run_install(cli: &Cli, args: DesktopJsonArgs) -> anyhow::Result<()> {
         config_server,
         bootstrap_token,
         version,
+        &mut emit_event,
+    )
+    .await
+}
+
+async fn run_status(cli: &Cli, args: DesktopJsonArgs) -> anyhow::Result<()> {
+    ensure_json(args)?;
+    let req: StatusRequest = read_optional_request()?;
+    let install_dir = resolve_install_dir(cli, req.install_dir);
+    let config_server = resolve_optional_config_server(cli, req.config_server)?;
+
+    let mut emit_event = |event, data| emit(event, data);
+    deploy::run_desktop_status(
+        Some(install_dir),
+        config_server,
+        req.bootstrap_token,
+        req.version,
         &mut emit_event,
     )
     .await
@@ -74,6 +92,25 @@ fn read_request<T: DeserializeOwned>() -> anyhow::Result<T> {
     serde_json::from_str(&input).map_err(|err| anyhow::anyhow!("desktop JSON 请求无效: {}", err))
 }
 
+fn read_optional_request<T>() -> anyhow::Result<T>
+where
+    T: Default + DeserializeOwned,
+{
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Ok(T::default());
+    }
+
+    let mut input = String::new();
+    stdin.read_to_string(&mut input)?;
+    if input.trim().is_empty() {
+        return Ok(T::default());
+    }
+
+    serde_json::from_str(&input)
+        .map_err(|err| anyhow::anyhow!("desktop JSON 璇锋眰鏃犳晥: {}", err))
+}
+
 fn resolve_install_dir(cli: &Cli, request_dir: Option<PathBuf>) -> PathBuf {
     request_dir
         .or_else(|| cli.install_dir.clone())
@@ -87,6 +124,17 @@ fn resolve_config_server(cli: &Cli, request_base: Option<String>) -> anyhow::Res
         request_base.or_else(|| cli.config_server.clone()),
         "",
     )
+}
+
+fn resolve_optional_config_server(
+    cli: &Cli,
+    request_base: Option<String>,
+) -> anyhow::Result<Option<String>> {
+    if request_base.is_none() && cli.config_server.is_none() {
+        return Ok(None);
+    }
+
+    resolve_config_server(cli, request_base).map(Some)
 }
 
 fn required(value: Option<String>, field: &str) -> anyhow::Result<String> {
@@ -144,6 +192,19 @@ fn error_code(err: &anyhow::Error) -> &'static str {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InstallRequest {
+    #[serde(default)]
+    bootstrap_token: Option<String>,
+    #[serde(default)]
+    install_dir: Option<PathBuf>,
+    #[serde(default)]
+    config_server: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StatusRequest {
     #[serde(default)]
     bootstrap_token: Option<String>,
     #[serde(default)]
@@ -214,6 +275,7 @@ mod tests {
     #[test]
     fn rejects_access_token_fields() {
         assert!(serde_json::from_str::<InstallRequest>(r#"{"access_token":"token"}"#).is_err());
+        assert!(serde_json::from_str::<StatusRequest>(r#"{"access_token":"token"}"#).is_err());
         assert!(serde_json::from_str::<UpdateRequest>(r#"{"access_token":"token"}"#).is_err());
         assert!(serde_json::from_str::<UninstallRequest>(r#"{"access_token":"token"}"#).is_err());
     }

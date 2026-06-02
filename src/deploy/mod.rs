@@ -208,6 +208,53 @@ fn get_or_create_machine_id(install_dir: &Path) -> anyhow::Result<String> {
     Ok(id)
 }
 
+fn read_machine_id(install_dir: &Path) -> Option<String> {
+    let id = std::fs::read_to_string(install_dir.join(".machine-id"))
+        .ok()?
+        .trim()
+        .to_string();
+    if id.is_empty() { None } else { Some(id) }
+}
+
+fn service_config_matches(binary_path: Option<&String>, expected_config_url: &str) -> Option<bool> {
+    let binary_path = binary_path?;
+    if binary_path.contains(expected_config_url) {
+        Some(true)
+    } else if binary_path.contains("--config-server") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn machine_id_from_service_args(binary_path: Option<&String>) -> Option<String> {
+    let binary_path = binary_path?;
+    let mut parts = binary_path.split_whitespace();
+    while let Some(part) = parts.next() {
+        if let Some(value) = part.strip_prefix("--machine-id=") {
+            if !value.trim().is_empty() {
+                return Some(value.trim().to_string());
+            }
+        }
+        if part == "--machine-id" {
+            let value = parts.next()?.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn version_matches(installed: Option<&str>, target: &str) -> bool {
+    let Some(installed) = installed else {
+        return false;
+    };
+    let installed = installed.trim().trim_start_matches('v');
+    let target = target.trim().trim_start_matches('v');
+    installed == target || installed.starts_with(&format!("{target}-"))
+}
+
 #[derive(Debug, Clone)]
 enum NetworkAction {
     Keep,
@@ -571,6 +618,86 @@ pub(crate) async fn run_deploy(
     Ok(())
 }
 
+pub(crate) async fn run_desktop_status(
+    install_dir: Option<PathBuf>,
+    config_server: Option<String>,
+    bootstrap_token: Option<String>,
+    version: Option<String>,
+    emit: DesktopEventEmitter<'_>,
+) -> anyhow::Result<()> {
+    let install_dir = install_dir.unwrap_or_else(default_install_dir);
+    let core_path = install_dir.join(core_binary_name());
+    let cli_path = install_dir.join(cli_binary_name());
+    let binaries_present = core_path.exists() && cli_path.exists();
+    let installed_version = if core_path.exists() {
+        service::get_core_version(&core_path)
+    } else {
+        None
+    };
+    let existing_fingerprint = service::bootstrap_fingerprint(&install_dir);
+    let service_status = service::query_service_status(
+        &install_dir,
+        if cli_path.exists() {
+            Some(&cli_path)
+        } else {
+            None
+        },
+    )
+    .await;
+    let machine_id = read_machine_id(&install_dir)
+        .or_else(|| machine_id_from_service_args(service_status.binary_path.as_ref()));
+
+    let expected_fingerprint = bootstrap_token
+        .as_deref()
+        .map(service::bootstrap_fingerprint_for_token);
+    let identity_match = expected_fingerprint
+        .as_deref()
+        .map(|expected| existing_fingerprint.as_deref() == Some(expected));
+    let target_version = version.map(|value| download::normalize_version(&value));
+    let version_match = target_version
+        .as_deref()
+        .map(|target| version_matches(installed_version.as_deref(), target));
+    let expected_config_url = config_server.as_ref().and_then(|base| {
+        bootstrap_token
+            .as_deref()
+            .map(|token| format!("{}/{}", base.trim_end_matches('/'), token))
+    });
+    let config_server_match = expected_config_url
+        .as_ref()
+        .and_then(|expected| service_config_matches(service_status.binary_path.as_ref(), expected));
+    let ready = service_status.installed
+        && service_status.running
+        && binaries_present
+        && identity_match.unwrap_or(true)
+        && version_match.unwrap_or(true)
+        && config_server_match.unwrap_or(true);
+
+    emit(
+        "finished",
+        serde_json::json!({
+            "install_dir": install_dir.to_string_lossy(),
+            "service_name": service::SERVICE_NAME,
+            "installed": service_status.installed,
+            "running": service_status.running,
+            "service_state": service_status.state,
+            "binary_path": service_status.binary_path,
+            "machine_id": machine_id,
+            "core_path": core_path.to_string_lossy(),
+            "cli_path": cli_path.to_string_lossy(),
+            "binaries_present": binaries_present,
+            "version": installed_version,
+            "target_version": target_version,
+            "bootstrap_fingerprint": existing_fingerprint,
+            "identity_match": identity_match,
+            "version_match": version_match,
+            "config_server_match": config_server_match,
+            "ready": ready,
+        }),
+    )?;
+
+    Ok(())
+}
+
 pub(crate) async fn run_desktop_install(
     install_dir: Option<PathBuf>,
     config_server: String,
@@ -581,8 +708,6 @@ pub(crate) async fn run_desktop_install(
     let install_dir = install_dir.unwrap_or_else(default_install_dir);
     let lifecycle_lock = acquire_desktop_lifecycle_lock(&install_dir)?;
     hold_desktop_lifecycle_lock(&lifecycle_lock);
-    check_install_dir_writable(&install_dir)?;
-    std::fs::create_dir_all(&install_dir)?;
 
     emit(
         "started",
@@ -591,7 +716,7 @@ pub(crate) async fn run_desktop_install(
         }),
     )?;
 
-    let machine_id = get_or_create_machine_id(&install_dir)?;
+    let mut machine_id = read_machine_id(&install_dir).unwrap_or_default();
     let full_config_url = format!(
         "{}/{}",
         config_server.trim_end_matches('/'),
@@ -619,6 +744,23 @@ pub(crate) async fn run_desktop_install(
         None
     };
     let identity_match = existing_fingerprint.as_deref() == Some(expected_fingerprint.as_str());
+    let service_status = service::query_service_status(
+        &install_dir,
+        if existing_cli_path.exists() {
+            Some(&existing_cli_path)
+        } else {
+            None
+        },
+    )
+    .await;
+    if machine_id.is_empty() {
+        if let Some(id) = machine_id_from_service_args(service_status.binary_path.as_ref()) {
+            machine_id = id;
+        }
+    }
+    let config_server_match =
+        service_config_matches(service_status.binary_path.as_ref(), &full_config_url)
+            .unwrap_or(true);
 
     emit(
         "identity_evaluated",
@@ -627,12 +769,19 @@ pub(crate) async fn run_desktop_install(
             "binaries_present": binaries_present,
             "installed_version": existing_version.clone(),
             "target_version": normalized_version.clone(),
+            "service_installed": service_status.installed,
+            "service_running": service_status.running,
+            "config_server_match": config_server_match,
         }),
     )?;
 
     if identity_match
         && binaries_present
-        && existing_version.as_deref() == Some(normalized_version.as_str())
+        && version_matches(existing_version.as_deref(), &normalized_version)
+        && service_status.installed
+        && service_status.running
+        && config_server_match
+        && !machine_id.is_empty()
     {
         emit(
             "service_installing",
@@ -640,14 +789,6 @@ pub(crate) async fn run_desktop_install(
                 "mode": "reuse_existing",
             }),
         )?;
-        ensure_desktop_service_running(
-            &install_dir,
-            &existing_core_path,
-            &existing_cli_path,
-            &full_config_url,
-            &machine_id,
-        )
-        .await?;
         emit(
             "service_started",
             serde_json::json!({
@@ -667,6 +808,12 @@ pub(crate) async fn run_desktop_install(
             }),
         )?;
         return Ok(());
+    }
+
+    check_install_dir_writable(&install_dir)?;
+    std::fs::create_dir_all(&install_dir)?;
+    if machine_id.is_empty() {
+        machine_id = get_or_create_machine_id(&install_dir)?;
     }
 
     let (core_path, cli_path, installed_version) =
@@ -702,23 +849,6 @@ pub(crate) async fn run_desktop_install(
     )?;
 
     Ok(())
-}
-
-async fn ensure_desktop_service_running(
-    install_dir: &Path,
-    core_path: &Path,
-    cli_path: &Path,
-    full_config_url: &str,
-    machine_id: &str,
-) -> anyhow::Result<()> {
-    install_desktop_service(
-        install_dir,
-        core_path,
-        cli_path,
-        full_config_url,
-        machine_id,
-    )
-    .await
 }
 
 async fn install_desktop_service(
@@ -823,7 +953,7 @@ pub(crate) async fn run_desktop_update(
 
     let core_path = install_dir.join(core_binary_name());
     let current_version = service::get_core_version(&core_path);
-    if current_version.as_deref() == Some(&target_version) {
+    if version_matches(current_version.as_deref(), &target_version) {
         emit(
             "finished",
             serde_json::json!({
@@ -927,7 +1057,7 @@ pub(crate) async fn run_desktop_update_service(
 
     let core_path = install_dir.join(core_binary_name());
     let current_version = service::get_core_version(&core_path);
-    if current_version.as_deref() == Some(&target_version) {
+    if version_matches(current_version.as_deref(), &target_version) {
         return Ok(());
     }
 
@@ -1227,7 +1357,7 @@ pub(crate) async fn run_upgrade(install_dir: &Path, target_version: &str) -> any
     let current_version =
         service::get_core_version(&core_path).unwrap_or_else(|| "未知".to_string());
 
-    if current_version == target_version {
+    if version_matches(Some(&current_version), &target_version) {
         crate::style::info(&format!(
             "当前已是最新版本 {}",
             target_version.bright_white()
@@ -1397,5 +1527,57 @@ mod tests {
             acquire_desktop_lifecycle_lock_in(&lock_dir, &install_dir).expect("lock after drop");
         drop(second);
         let _ = std::fs::remove_dir_all(lock_dir);
+    }
+
+    #[test]
+    fn matches_core_versions_with_release_prefixes() {
+        assert!(version_matches(Some("2.6.4-8428a89d"), "v2.6.4"));
+        assert!(version_matches(Some("2.6.4-8428a89d"), "v2.6.4-8428a89d"));
+        assert!(!version_matches(Some("2.6.5-8428a89d"), "v2.6.4"));
+    }
+
+    #[test]
+    fn service_config_match_is_unknown_when_args_are_not_visible() {
+        assert_eq!(
+            service_config_matches(
+                Some(&"/usr/local/easytier/easytier-core".to_string()),
+                "tcp://console/token",
+            ),
+            None
+        );
+        assert_eq!(
+            service_config_matches(
+                Some(
+                    &"/usr/local/easytier/easytier-core --config-server tcp://console/token"
+                        .to_string()
+                ),
+                "tcp://console/token",
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            service_config_matches(
+                Some(
+                    &"/usr/local/easytier/easytier-core --config-server tcp://console/other"
+                        .to_string()
+                ),
+                "tcp://console/token",
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn reads_machine_id_from_service_args() {
+        assert_eq!(
+            machine_id_from_service_args(Some(
+                &"easytier-core --machine-id machine-1 --secure-mode=true".to_string()
+            )),
+            Some("machine-1".to_string())
+        );
+        assert_eq!(
+            machine_id_from_service_args(Some(&"easytier-core --machine-id=machine-2".to_string())),
+            Some("machine-2".to_string())
+        );
     }
 }

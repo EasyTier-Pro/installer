@@ -7,6 +7,14 @@ const LEGACY_CORE_SERVICE_CONFIG_FILE: &str = "easytier-core-service.toml";
 
 pub(crate) type BootstrapFingerprint = String;
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ServiceStatusInfo {
+    pub installed: bool,
+    pub running: bool,
+    pub state: Option<String>,
+    pub binary_path: Option<String>,
+}
+
 pub(crate) fn service_not_installed(output: &std::process::Output) -> bool {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -38,77 +46,324 @@ fn service_missing_in_sc(output: &std::process::Output) -> bool {
 }
 
 pub(crate) async fn service_is_installed(cli_path: &Path) -> bool {
+    let install_dir = cli_path.parent().unwrap_or_else(|| Path::new(""));
+    query_service_status(install_dir, Some(cli_path))
+        .await
+        .installed
+}
+
+pub(crate) async fn query_service_status(
+    install_dir: &Path,
+    cli_path: Option<&Path>,
+) -> ServiceStatusInfo {
     #[cfg(windows)]
     {
-        if let Ok(output) = tokio::process::Command::new("sc")
-            .args(["query", SERVICE_NAME])
-            .output()
-            .await
-        {
-            crate::style::debug(&format!(
-                "service_is_installed(sc): 退出码={:?}",
-                output.status.code()
-            ));
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stdout.trim().is_empty() {
-                crate::style::debug(&format!(
-                    "service_is_installed(sc): stdout={}",
-                    stdout.trim()
-                ));
-            }
-            if !stderr.trim().is_empty() {
-                crate::style::debug(&format!(
-                    "service_is_installed(sc): stderr={}",
-                    stderr.trim()
-                ));
-            }
-            if service_missing_in_sc(&output) {
-                return false;
-            }
-            if stdout.contains("SERVICE_NAME:") || output.status.success() {
-                return true;
-            }
-        }
-
-        if let Ok(output) = tokio::process::Command::new(cli_path)
-            .args(["service", "--name", SERVICE_NAME, "status"])
-            .output()
-            .await
-        {
-            crate::style::debug(&format!(
-                "service_is_installed(cli): 退出码={:?}",
-                output.status.code()
-            ));
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stdout.trim().is_empty() {
-                crate::style::debug(&format!(
-                    "service_is_installed(cli): stdout={}",
-                    stdout.trim()
-                ));
-            }
-            if !stderr.trim().is_empty() {
-                crate::style::debug(&format!(
-                    "service_is_installed(cli): stderr={}",
-                    stderr.trim()
-                ));
-            }
-            return !service_not_installed(&output);
-        }
-
-        false
+        let _ = install_dir;
+        let _ = cli_path;
+        return windows_service_status().await;
     }
-    #[cfg(not(windows))]
+
+    #[cfg(target_os = "macos")]
     {
-        if let Ok(output) = tokio::process::Command::new(cli_path)
-            .args(["service", "--name", SERVICE_NAME, "status"])
-            .output()
-            .await
-        {
-            return !service_not_installed(&output);
+        let _ = install_dir;
+        let status = macos_service_status().await;
+        if status.installed {
+            return status;
         }
-        false
+        if let Some(cli_path) = cli_path {
+            return cli_service_status(cli_path).await;
+        }
+        return status;
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = install_dir;
+        let status = linux_service_status().await;
+        if status.installed {
+            return status;
+        }
+        if let Some(cli_path) = cli_path {
+            return cli_service_status(cli_path).await;
+        }
+        return status;
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = install_dir;
+        if let Some(cli_path) = cli_path {
+            return cli_service_status(cli_path).await;
+        }
+        ServiceStatusInfo::default()
+    }
+}
+
+#[cfg(windows)]
+async fn windows_service_status() -> ServiceStatusInfo {
+    let Ok(query) = tokio::process::Command::new("sc")
+        .args(["query", SERVICE_NAME])
+        .output()
+        .await
+    else {
+        return ServiceStatusInfo::default();
+    };
+
+    if service_missing_in_sc(&query) {
+        return ServiceStatusInfo::default();
+    }
+
+    let stdout = String::from_utf8_lossy(&query.stdout);
+    let installed = query.status.success() || stdout.contains("SERVICE_NAME:");
+    if !installed {
+        return ServiceStatusInfo::default();
+    }
+
+    let state = parse_sc_state(&stdout);
+    let running = state.as_deref() == Some("RUNNING") || stdout.contains("RUNNING");
+    let binary_path = windows_service_binary_path().await;
+
+    ServiceStatusInfo {
+        installed,
+        running,
+        state,
+        binary_path,
+    }
+}
+
+#[cfg(windows)]
+async fn windows_service_binary_path() -> Option<String> {
+    let output = tokio::process::Command::new("sc")
+        .args(["qc", SERVICE_NAME])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_sc_binary_path(&stdout)
+}
+
+#[cfg(target_os = "macos")]
+async fn macos_service_status() -> ServiceStatusInfo {
+    let system = launchctl_service_status(&format!("system/{}", SERVICE_NAME)).await;
+    if system.installed {
+        return system;
+    }
+
+    if let Some(uid) = current_uid().await {
+        let gui = launchctl_service_status(&format!("gui/{}/{}", uid, SERVICE_NAME)).await;
+        if gui.installed {
+            return gui;
+        }
+    }
+
+    ServiceStatusInfo::default()
+}
+
+#[cfg(target_os = "macos")]
+async fn current_uid() -> Option<String> {
+    let output = tokio::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if uid.is_empty() { None } else { Some(uid) }
+}
+
+#[cfg(target_os = "macos")]
+async fn launchctl_service_status(target: &str) -> ServiceStatusInfo {
+    let Ok(output) = tokio::process::Command::new("launchctl")
+        .args(["print", target])
+        .output()
+        .await
+    else {
+        return ServiceStatusInfo::default();
+    };
+
+    if !output.status.success() {
+        return ServiceStatusInfo::default();
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_launchctl_print(&stdout)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+async fn linux_service_status() -> ServiceStatusInfo {
+    let Ok(output) = tokio::process::Command::new("systemctl")
+        .args([
+            "show",
+            SERVICE_NAME,
+            "--property=LoadState,ActiveState,ExecStart",
+            "--no-pager",
+        ])
+        .output()
+        .await
+    else {
+        return ServiceStatusInfo::default();
+    };
+
+    if !output.status.success() {
+        return ServiceStatusInfo::default();
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_systemctl_show(&stdout)
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+async fn cli_service_status(cli_path: &Path) -> ServiceStatusInfo {
+    let Ok(output) = tokio::process::Command::new(cli_path)
+        .args(["service", "--name", SERVICE_NAME, "status"])
+        .output()
+        .await
+    else {
+        return ServiceStatusInfo::default();
+    };
+
+    if service_not_installed(&output) {
+        return ServiceStatusInfo::default();
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let text = format!("{}\n{}", stdout, stderr);
+    let state = parse_status_text_state(&text);
+    let running = state.as_deref() == Some("RUNNING")
+        || text.to_ascii_lowercase().contains("running")
+        || text.to_ascii_lowercase().contains("active");
+
+    ServiceStatusInfo {
+        installed: true,
+        running,
+        state,
+        binary_path: None,
+    }
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn parse_status_text_state(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("running") || lower.contains("active") {
+        Some("RUNNING".to_string())
+    } else if lower.contains("stopped") || lower.contains("inactive") {
+        Some("STOPPED".to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_sc_state(text: &str) -> Option<String> {
+    text.lines()
+        .find(|line| line.contains("STATE"))
+        .and_then(|line| line.split_whitespace().last())
+        .map(|state| state.trim().to_ascii_uppercase())
+}
+
+fn parse_sc_binary_path(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let trimmed = line.trim_start();
+        let value = trimmed.strip_prefix("BINARY_PATH_NAME")?;
+        let value = value.split_once(':')?.1.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    })
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn parse_launchctl_print(text: &str) -> ServiceStatusInfo {
+    let lower = text.to_ascii_lowercase();
+    let state = text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let value = trimmed.strip_prefix("state =")?.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_ascii_uppercase())
+        }
+    });
+    let running = state.as_deref() == Some("RUNNING")
+        || lower.contains("state = running")
+        || text.lines().any(|line| {
+            let trimmed = line.trim();
+            let Some(value) = trimmed.strip_prefix("pid =") else {
+                return false;
+            };
+            value.trim().parse::<u32>().is_ok_and(|pid| pid > 0)
+        });
+    let binary_path = text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let value = trimmed
+            .strip_prefix("program =")
+            .or_else(|| trimmed.strip_prefix("path ="))?
+            .trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    });
+
+    ServiceStatusInfo {
+        installed: true,
+        running,
+        state,
+        binary_path,
+    }
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn parse_systemctl_show(text: &str) -> ServiceStatusInfo {
+    let load_state = key_value_line(text, "LoadState");
+    let active_state = key_value_line(text, "ActiveState");
+    let exec_start = key_value_line(text, "ExecStart");
+    let installed = load_state.as_deref() == Some("loaded");
+    let running = active_state.as_deref() == Some("active");
+    let state = active_state.map(|state| state.to_ascii_uppercase());
+    let binary_path = exec_start.and_then(|value| parse_systemctl_exec_path(&value));
+
+    ServiceStatusInfo {
+        installed,
+        running,
+        state,
+        binary_path,
+    }
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn key_value_line(text: &str, key: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let (line_key, value) = line.split_once('=')?;
+        if line_key == key {
+            Some(value.trim().to_string())
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn parse_systemctl_exec_path(value: &str) -> Option<String> {
+    let start = value.find("path=")? + "path=".len();
+    let rest = &value[start..];
+    let end = rest
+        .find(|ch: char| ch.is_whitespace() || ch == ';')
+        .unwrap_or(rest.len());
+    let path = rest[..end].trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
     }
 }
 
@@ -363,6 +618,26 @@ fn hash_bootstrap_token(token: &str) -> String {
 }
 
 pub async fn run_status(install_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let install_dir = install_dir.unwrap_or_else(super::platform::default_install_dir);
+    let cli_path = find_easytier_cli(&install_dir).ok();
+    let status = query_service_status(&install_dir, cli_path.as_deref()).await;
+
+    if !status.installed {
+        anyhow::bail!("EasyTier service is not installed");
+    }
+
+    println!("service: {}", SERVICE_NAME);
+    println!("state: {}", status.state.as_deref().unwrap_or("UNKNOWN"));
+    println!("running: {}", status.running);
+    if let Some(binary_path) = status.binary_path {
+        println!("binary_path: {}", binary_path);
+    }
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+async fn run_status_legacy(install_dir: Option<PathBuf>) -> anyhow::Result<()> {
     let install_dir = install_dir.unwrap_or_else(super::platform::default_install_dir);
     let cli_path = find_easytier_cli(&install_dir)?;
 
@@ -630,6 +905,68 @@ mod tests {
             "The specified service does not exist as an installed service.",
         ));
         assert!(service_not_installed_text("", "指定的服务未安装"));
+    }
+
+    #[test]
+    fn parses_windows_sc_status_and_binary_path() {
+        let query = r#"
+SERVICE_NAME: easytier-pro
+        TYPE               : 10  WIN32_OWN_PROCESS
+        STATE              : 4  RUNNING
+"#;
+        let config = r#"
+SERVICE_NAME: easytier-pro
+        BINARY_PATH_NAME   : \??\C:\EasyTier\easytier-core.exe --config-server tcp://console/token --secure-mode=true
+"#;
+
+        assert_eq!(parse_sc_state(query), Some("RUNNING".to_string()));
+        assert_eq!(
+            parse_sc_binary_path(config),
+            Some(
+                r"\??\C:\EasyTier\easytier-core.exe --config-server tcp://console/token --secure-mode=true"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn parses_launchctl_status() {
+        let status = parse_launchctl_print(
+            r#"
+{
+    state = running
+    program = /usr/local/easytier/easytier-core
+    pid = 42
+}
+"#,
+        );
+
+        assert!(status.installed);
+        assert!(status.running);
+        assert_eq!(status.state, Some("RUNNING".to_string()));
+        assert_eq!(
+            status.binary_path,
+            Some("/usr/local/easytier/easytier-core".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_systemctl_status() {
+        let status = parse_systemctl_show(
+            r#"
+LoadState=loaded
+ActiveState=active
+ExecStart={ path=/opt/easytier/easytier-core ; argv[]=/opt/easytier/easytier-core --config-server tcp://console/token ; }
+"#,
+        );
+
+        assert!(status.installed);
+        assert!(status.running);
+        assert_eq!(status.state, Some("ACTIVE".to_string()));
+        assert_eq!(
+            status.binary_path,
+            Some("/opt/easytier/easytier-core".to_string())
+        );
     }
 
     #[test]

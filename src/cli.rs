@@ -131,6 +131,9 @@ pub enum DesktopCommand {
     /// 非交互安装并启动 EasyTier 服务
     Install(DesktopJsonArgs),
 
+    /// Non-interactive service status for desktop clients.
+    Status(DesktopJsonArgs),
+
     /// 非交互卸载 EasyTier 服务
     Uninstall(DesktopJsonArgs),
 
@@ -463,6 +466,16 @@ mod tests {
 
         let Some(Command::Desktop(DesktopCommand::Install(args))) = cli.command else {
             panic!("expected desktop install command");
+        };
+        assert!(args.json);
+    }
+
+    #[test]
+    fn parses_desktop_status_json_subcommand() {
+        let cli = Cli::parse_from(["easytier-pro-installer", "desktop", "status", "--json"]);
+
+        let Some(Command::Desktop(DesktopCommand::Status(args))) = cli.command else {
+            panic!("expected desktop status command");
         };
         assert!(args.json);
     }
