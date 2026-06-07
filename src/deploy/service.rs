@@ -60,7 +60,7 @@ pub(crate) async fn query_service_status(
     {
         let _ = install_dir;
         let _ = cli_path;
-        return windows_service_status().await;
+        windows_service_status().await
     }
 
     #[cfg(target_os = "macos")]

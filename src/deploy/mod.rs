@@ -231,10 +231,10 @@ fn machine_id_from_service_args(binary_path: Option<&String>) -> Option<String> 
     let binary_path = binary_path?;
     let mut parts = binary_path.split_whitespace();
     while let Some(part) = parts.next() {
-        if let Some(value) = part.strip_prefix("--machine-id=") {
-            if !value.trim().is_empty() {
-                return Some(value.trim().to_string());
-            }
+        if let Some(value) = part.strip_prefix("--machine-id=")
+            && !value.trim().is_empty()
+        {
+            return Some(value.trim().to_string());
         }
         if part == "--machine-id" {
             let value = parts.next()?.trim();
@@ -753,10 +753,10 @@ pub(crate) async fn run_desktop_install(
         },
     )
     .await;
-    if machine_id.is_empty() {
-        if let Some(id) = machine_id_from_service_args(service_status.binary_path.as_ref()) {
-            machine_id = id;
-        }
+    if machine_id.is_empty()
+        && let Some(id) = machine_id_from_service_args(service_status.binary_path.as_ref())
+    {
+        machine_id = id;
     }
     let config_server_match =
         service_config_matches(service_status.binary_path.as_ref(), &full_config_url)
