@@ -6,7 +6,7 @@ pub(crate) mod service;
 
 pub(crate) use check::{ExistingAction, check_existing_install};
 pub(crate) use platform::default_install_dir;
-pub(crate) use service::{run_status, run_uninstall};
+pub(crate) use service::{StatusQueryMode, run_status, run_uninstall};
 
 use crate::api::client::{
     ConsoleClient, CreateNetworkRequest, CreateNodeRequest, DeviceSummary, LatestReleaseResponse,
@@ -635,15 +635,7 @@ pub(crate) async fn run_desktop_status(
         None
     };
     let existing_fingerprint = service::bootstrap_fingerprint(&install_dir);
-    let service_status = service::query_service_status(
-        &install_dir,
-        if cli_path.exists() {
-            Some(&cli_path)
-        } else {
-            None
-        },
-    )
-    .await;
+    let service_status = service::query_service_status(&install_dir).await;
     let machine_id = read_machine_id(&install_dir)
         .or_else(|| machine_id_from_service_args(service_status.binary_path.as_ref()));
 
@@ -744,15 +736,7 @@ pub(crate) async fn run_desktop_install(
         None
     };
     let identity_match = existing_fingerprint.as_deref() == Some(expected_fingerprint.as_str());
-    let service_status = service::query_service_status(
-        &install_dir,
-        if existing_cli_path.exists() {
-            Some(&existing_cli_path)
-        } else {
-            None
-        },
-    )
-    .await;
+    let service_status = service::query_service_status(&install_dir).await;
     if machine_id.is_empty()
         && let Some(id) = machine_id_from_service_args(service_status.binary_path.as_ref())
     {

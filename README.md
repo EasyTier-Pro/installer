@@ -126,6 +126,12 @@ EasyTier 已就绪: ...
 # 查看服务状态
 ~/.local/share/easytier-pro-installer/easytier-pro-installer status
 
+# 只使用免提权的系统服务管理器查询状态
+~/.local/share/easytier-pro-installer/easytier-pro-installer status --native
+
+# 只使用 easytier-cli 查询状态，兼容性更广但可能需要提权
+~/.local/share/easytier-pro-installer/easytier-pro-installer status --legacy
+
 # 卸载服务，保留已下载文件和缓存
 ~/.local/share/easytier-pro-installer/easytier-pro-installer uninstall
 
@@ -148,7 +154,11 @@ EasyTier 已就绪: ...
 |--------|------|----------|------|
 | `install` | `-v, --version` | `EASYTIER_VERSION` | 指定安装的 EasyTier 版本号 |
 | `update` | `-v, --version` | `EASYTIER_VERSION` | 指定更新到的 EasyTier 版本号 |
+| `status` | `--native` | - | 只使用免提权的系统服务管理器查询 |
+| `status` | `--legacy` | - | 只使用 `easytier-cli service --name easytier-pro status` 查询 |
 | `uninstall` | `--purge` | - | 彻底删除安装目录和缓存压缩包 |
+
+`status` 默认先使用免提权查询；如果系统服务管理器无法确认服务状态且安装目录中存在 `easytier-cli`，会自动降级到 `easytier-cli service --name easytier-pro status`。
 
 ## 桌面端集成
 

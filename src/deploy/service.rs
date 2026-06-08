@@ -15,6 +15,13 @@ pub(crate) struct ServiceStatusInfo {
     pub binary_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StatusQueryMode {
+    Auto,
+    Native,
+    Legacy,
+}
+
 pub(crate) fn service_not_installed(output: &std::process::Output) -> bool {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -28,6 +35,8 @@ fn service_not_installed_text(stdout: &str, stderr: &str) -> bool {
         || stderr.contains("1060")
         || stdout.contains("does not exist as an installed service")
         || stderr.contains("does not exist as an installed service")
+        || stdout.contains("does not exist in /etc/rc.d")
+        || stderr.contains("does not exist in /etc/rc.d")
         || stdout.contains("指定的服务未安装")
         || stderr.contains("指定的服务未安装")
 }
@@ -47,54 +56,64 @@ fn service_missing_in_sc(output: &std::process::Output) -> bool {
 
 pub(crate) async fn service_is_installed(cli_path: &Path) -> bool {
     let install_dir = cli_path.parent().unwrap_or_else(|| Path::new(""));
-    query_service_status(install_dir, Some(cli_path))
+    if query_service_status(install_dir).await.installed {
+        return true;
+    }
+
+    let Ok(output) = tokio::process::Command::new(cli_path)
+        .args(["service", "--name", SERVICE_NAME, "status"])
+        .output()
         .await
-        .installed
+    else {
+        return false;
+    };
+
+    legacy_status_installed(
+        output.status.success(),
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    )
+    .unwrap_or(false)
 }
 
-pub(crate) async fn query_service_status(
-    install_dir: &Path,
-    cli_path: Option<&Path>,
-) -> ServiceStatusInfo {
+fn legacy_status_installed(status_success: bool, stdout: &str, stderr: &str) -> Option<bool> {
+    if service_not_installed_text(stdout, stderr) {
+        Some(false)
+    } else if status_success {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+pub(crate) async fn query_service_status(install_dir: &Path) -> ServiceStatusInfo {
     #[cfg(windows)]
     {
         let _ = install_dir;
-        let _ = cli_path;
         windows_service_status().await
     }
 
     #[cfg(target_os = "macos")]
     {
         let _ = install_dir;
-        let status = macos_service_status().await;
-        if status.installed {
-            return status;
-        }
-        if let Some(cli_path) = cli_path {
-            return cli_service_status(cli_path).await;
-        }
-        return status;
+        macos_service_status().await
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(target_os = "freebsd")]
     {
         let _ = install_dir;
-        let status = linux_service_status().await;
-        if status.installed {
-            return status;
-        }
-        if let Some(cli_path) = cli_path {
-            return cli_service_status(cli_path).await;
-        }
-        return status;
+        freebsd_service_status().await
+    }
+
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "freebsd"))))]
+    {
+        let _ = install_dir;
+        linux_service_status().await
     }
 
     #[cfg(not(any(unix, windows)))]
     {
         let _ = install_dir;
-        if let Some(cli_path) = cli_path {
-            return cli_service_status(cli_path).await;
-        }
         ServiceStatusInfo::default()
     }
 }
@@ -195,7 +214,7 @@ async fn launchctl_service_status(target: &str) -> ServiceStatusInfo {
     parse_launchctl_print(&stdout)
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "freebsd"))))]
 async fn linux_service_status() -> ServiceStatusInfo {
     let Ok(output) = tokio::process::Command::new("systemctl")
         .args([
@@ -218,46 +237,53 @@ async fn linux_service_status() -> ServiceStatusInfo {
     parse_systemctl_show(&stdout)
 }
 
-#[cfg_attr(windows, allow(dead_code))]
-async fn cli_service_status(cli_path: &Path) -> ServiceStatusInfo {
-    let Ok(output) = tokio::process::Command::new(cli_path)
-        .args(["service", "--name", SERVICE_NAME, "status"])
+#[cfg(target_os = "freebsd")]
+async fn freebsd_service_status() -> ServiceStatusInfo {
+    let installed = freebsd_service_installed().await;
+    let Ok(output) = tokio::process::Command::new("service")
+        .args([SERVICE_NAME, "status"])
         .output()
         .await
     else {
-        return ServiceStatusInfo::default();
+        return ServiceStatusInfo {
+            installed,
+            ..ServiceStatusInfo::default()
+        };
     };
-
-    if service_not_installed(&output) {
-        return ServiceStatusInfo::default();
-    }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let text = format!("{}\n{}", stdout, stderr);
-    let state = parse_status_text_state(&text);
-    let running = state.as_deref() == Some("RUNNING")
-        || text.to_ascii_lowercase().contains("running")
-        || text.to_ascii_lowercase().contains("active");
-
-    ServiceStatusInfo {
-        installed: true,
-        running,
-        state,
-        binary_path: None,
-    }
+    parse_freebsd_service_status(installed || output.status.success(), &stdout, &stderr)
 }
 
-#[cfg_attr(windows, allow(dead_code))]
-fn parse_status_text_state(text: &str) -> Option<String> {
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("running") || lower.contains("active") {
-        Some("RUNNING".to_string())
-    } else if lower.contains("stopped") || lower.contains("inactive") {
-        Some("STOPPED".to_string())
-    } else {
-        None
+#[cfg(target_os = "freebsd")]
+async fn freebsd_service_installed() -> bool {
+    let rc_paths = [
+        format!("/usr/local/etc/rc.d/{SERVICE_NAME}"),
+        format!("/etc/rc.d/{SERVICE_NAME}"),
+    ];
+    if rc_paths.iter().any(|path| Path::new(path).exists()) {
+        return true;
     }
+
+    let Ok(output) = tokio::process::Command::new("service")
+        .arg("-e")
+        .output()
+        .await
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().any(|line| {
+        line.trim_end()
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name == SERVICE_NAME)
+    })
 }
 
 fn parse_sc_state(text: &str) -> Option<String> {
@@ -364,6 +390,40 @@ fn parse_systemctl_exec_path(value: &str) -> Option<String> {
         None
     } else {
         Some(path.to_string())
+    }
+}
+
+#[cfg_attr(not(any(target_os = "freebsd", test)), allow(dead_code))]
+fn parse_freebsd_service_status(
+    installed_hint: bool,
+    stdout: &str,
+    stderr: &str,
+) -> ServiceStatusInfo {
+    if service_not_installed_text(stdout, stderr) {
+        return ServiceStatusInfo::default();
+    }
+
+    let text = format!("{stdout}\n{stderr}");
+    let lower = text.to_ascii_lowercase();
+    let stopped = lower.contains("not running") || lower.contains("is stopped");
+    let running = !stopped
+        && (lower.contains("is running")
+            || lower.contains("running as pid")
+            || lower.contains(" pid "));
+    let installed = installed_hint || running || stopped;
+    let state = if running {
+        Some("RUNNING".to_string())
+    } else if stopped {
+        Some("STOPPED".to_string())
+    } else {
+        None
+    };
+
+    ServiceStatusInfo {
+        installed,
+        running,
+        state,
+        binary_path: None,
     }
 }
 
@@ -617,28 +677,76 @@ fn hash_bootstrap_token(token: &str) -> String {
     out
 }
 
-pub async fn run_status(install_dir: Option<PathBuf>) -> anyhow::Result<()> {
-    let install_dir = install_dir.unwrap_or_else(super::platform::default_install_dir);
-    let cli_path = find_easytier_cli(&install_dir).ok();
-    let status = query_service_status(&install_dir, cli_path.as_deref()).await;
+pub async fn run_status(install_dir: Option<PathBuf>, mode: StatusQueryMode) -> anyhow::Result<()> {
+    match mode {
+        StatusQueryMode::Auto => {
+            let install_dir = install_dir.unwrap_or_else(super::platform::default_install_dir);
+            run_status_auto(&install_dir).await
+        }
+        StatusQueryMode::Native => {
+            let install_dir = install_dir.unwrap_or_else(super::platform::default_install_dir);
+            run_status_native(&install_dir).await
+        }
+        StatusQueryMode::Legacy => run_status_legacy(install_dir).await,
+    }
+}
 
+async fn run_status_auto(install_dir: &Path) -> anyhow::Result<()> {
+    let status = query_service_status(install_dir).await;
+    match decide_auto_status(&status, find_easytier_cli(install_dir).is_ok()) {
+        AutoStatusDecision::Native => {
+            print_service_status(&status);
+            Ok(())
+        }
+        AutoStatusDecision::Legacy => run_status_legacy_with_install_dir(install_dir).await,
+        AutoStatusDecision::Missing => {
+            anyhow::bail!("EasyTier service is not installed or cannot be queried")
+        }
+    }
+}
+
+async fn run_status_native(install_dir: &Path) -> anyhow::Result<()> {
+    let status = query_service_status(install_dir).await;
     if !status.installed {
         anyhow::bail!("EasyTier service is not installed");
     }
 
-    println!("service: {}", SERVICE_NAME);
-    println!("state: {}", status.state.as_deref().unwrap_or("UNKNOWN"));
-    println!("running: {}", status.running);
-    if let Some(binary_path) = status.binary_path {
-        println!("binary_path: {}", binary_path);
-    }
-
+    print_service_status(&status);
     Ok(())
 }
 
-#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoStatusDecision {
+    Native,
+    Legacy,
+    Missing,
+}
+
+fn decide_auto_status(status: &ServiceStatusInfo, legacy_available: bool) -> AutoStatusDecision {
+    if status.installed {
+        AutoStatusDecision::Native
+    } else if legacy_available {
+        AutoStatusDecision::Legacy
+    } else {
+        AutoStatusDecision::Missing
+    }
+}
+
+fn print_service_status(status: &ServiceStatusInfo) {
+    println!("service: {}", SERVICE_NAME);
+    println!("state: {}", status.state.as_deref().unwrap_or("UNKNOWN"));
+    println!("running: {}", status.running);
+    if let Some(binary_path) = &status.binary_path {
+        println!("binary_path: {}", binary_path);
+    }
+}
+
 async fn run_status_legacy(install_dir: Option<PathBuf>) -> anyhow::Result<()> {
     let install_dir = install_dir.unwrap_or_else(super::platform::default_install_dir);
+    run_status_legacy_with_install_dir(&install_dir).await
+}
+
+async fn run_status_legacy_with_install_dir(install_dir: &Path) -> anyhow::Result<()> {
     let cli_path = find_easytier_cli(&install_dir)?;
 
     let status = tokio::process::Command::new(&cli_path)
@@ -904,7 +1012,49 @@ mod tests {
             "",
             "The specified service does not exist as an installed service.",
         ));
+        assert!(service_not_installed_text(
+            "",
+            "easytier-pro does not exist in /etc/rc.d or the local startup directories",
+        ));
         assert!(service_not_installed_text("", "指定的服务未安装"));
+    }
+
+    #[test]
+    fn classifies_legacy_status_installed_only_on_success() {
+        assert_eq!(
+            legacy_status_installed(true, "Service is running", ""),
+            Some(true)
+        );
+        assert_eq!(
+            legacy_status_installed(false, "", "Service is not installed"),
+            Some(false)
+        );
+        assert_eq!(
+            legacy_status_installed(false, "", "permission denied"),
+            None
+        );
+    }
+
+    #[test]
+    fn decides_auto_status_fallback() {
+        let installed = ServiceStatusInfo {
+            installed: true,
+            ..ServiceStatusInfo::default()
+        };
+        let missing = ServiceStatusInfo::default();
+
+        assert_eq!(
+            decide_auto_status(&installed, true),
+            AutoStatusDecision::Native
+        );
+        assert_eq!(
+            decide_auto_status(&missing, true),
+            AutoStatusDecision::Legacy
+        );
+        assert_eq!(
+            decide_auto_status(&missing, false),
+            AutoStatusDecision::Missing
+        );
     }
 
     #[test]
@@ -967,6 +1117,28 @@ ExecStart={ path=/opt/easytier/easytier-core ; argv[]=/opt/easytier/easytier-cor
             status.binary_path,
             Some("/opt/easytier/easytier-core".to_string())
         );
+    }
+
+    #[test]
+    fn parses_freebsd_service_status() {
+        let running = parse_freebsd_service_status(true, "easytier-pro is running as pid 42.", "");
+        assert!(running.installed);
+        assert!(running.running);
+        assert_eq!(running.state, Some("RUNNING".to_string()));
+
+        let stopped = parse_freebsd_service_status(true, "easytier-pro is not running.", "");
+        assert!(stopped.installed);
+        assert!(!stopped.running);
+        assert_eq!(stopped.state, Some("STOPPED".to_string()));
+
+        let missing = parse_freebsd_service_status(
+            false,
+            "",
+            "easytier-pro does not exist in /etc/rc.d or the local startup directories",
+        );
+        assert!(!missing.installed);
+        assert!(!missing.running);
+        assert_eq!(missing.state, None);
     }
 
     #[test]

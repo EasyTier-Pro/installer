@@ -40,7 +40,7 @@ pub enum Command {
     Uninstall(UninstallArgs),
 
     /// 查看服务状态
-    Status,
+    Status(StatusArgs),
 
     /// 面向桌面端的 JSON 子进程协议
     #[command(subcommand, hide = true)]
@@ -73,6 +73,17 @@ pub struct UninstallArgs {
     /// 彻底删除安装目录和缓存压缩包
     #[arg(long)]
     pub purge: bool,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct StatusArgs {
+    /// 只使用免提权的系统服务管理器查询
+    #[arg(long, conflicts_with = "legacy")]
+    pub native: bool,
+
+    /// 只使用 easytier-cli service --name easytier-pro status 查询
+    #[arg(long, conflicts_with = "native")]
+    pub legacy: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -157,11 +168,23 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Install(args) => run_install(cli, args).await,
         Command::Update(args) => run_update(cli, args).await,
         Command::Uninstall(args) => run_uninstall(cli, args).await,
-        Command::Status => deploy::run_status(cli.install_dir).await,
+        Command::Status(args) => {
+            deploy::run_status(cli.install_dir, status_query_mode(&args)).await
+        }
         Command::Desktop(command) => desktop::run(cli, command).await,
         Command::InstallService(args) => run_install_service(cli, args).await,
         Command::UpgradeService(args) => run_upgrade_service(cli, args).await,
         Command::UninstallService(args) => run_uninstall_service(cli, args).await,
+    }
+}
+
+fn status_query_mode(args: &StatusArgs) -> deploy::StatusQueryMode {
+    if args.native {
+        deploy::StatusQueryMode::Native
+    } else if args.legacy {
+        deploy::StatusQueryMode::Legacy
+    } else {
+        deploy::StatusQueryMode::Auto
     }
 }
 
@@ -457,7 +480,63 @@ mod tests {
     fn parses_status_subcommand() {
         let cli = Cli::parse_from(["easytier-pro-installer", "status"]);
 
-        assert!(matches!(cli.command, Some(Command::Status)));
+        let Some(Command::Status(args)) = cli.command else {
+            panic!("expected status command");
+        };
+        assert!(!args.native);
+        assert!(!args.legacy);
+    }
+
+    #[test]
+    fn parses_status_native_subcommand() {
+        let cli = Cli::parse_from(["easytier-pro-installer", "status", "--native"]);
+
+        let Some(Command::Status(args)) = cli.command else {
+            panic!("expected status command");
+        };
+        assert!(args.native);
+        assert!(!args.legacy);
+    }
+
+    #[test]
+    fn parses_status_legacy_subcommand() {
+        let cli = Cli::parse_from(["easytier-pro-installer", "status", "--legacy"]);
+
+        let Some(Command::Status(args)) = cli.command else {
+            panic!("expected status command");
+        };
+        assert!(!args.native);
+        assert!(args.legacy);
+    }
+
+    #[test]
+    fn rejects_conflicting_status_modes() {
+        let err = Cli::try_parse_from(["easytier-pro-installer", "status", "--native", "--legacy"])
+            .unwrap_err();
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn maps_status_args_to_query_modes() {
+        assert_eq!(
+            status_query_mode(&StatusArgs::default()),
+            deploy::StatusQueryMode::Auto
+        );
+        assert_eq!(
+            status_query_mode(&StatusArgs {
+                native: true,
+                legacy: false,
+            }),
+            deploy::StatusQueryMode::Native
+        );
+        assert_eq!(
+            status_query_mode(&StatusArgs {
+                native: false,
+                legacy: true,
+            }),
+            deploy::StatusQueryMode::Legacy
+        );
     }
 
     #[test]
