@@ -858,6 +858,9 @@ async fn install_desktop_service(
     full_config_url: &str,
     machine_id: &str,
 ) -> anyhow::Result<()> {
+    #[cfg(not(windows))]
+    let _ = install_dir;
+
     #[cfg(windows)]
     if !platform::is_elevated() {
         let lock_dir = desktop_lifecycle_dir();

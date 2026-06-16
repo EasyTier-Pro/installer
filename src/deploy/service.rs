@@ -73,7 +73,7 @@ pub(crate) async fn query_service_status(
         if let Some(cli_path) = cli_path {
             return cli_service_status(cli_path).await;
         }
-        return status;
+        status
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -86,7 +86,7 @@ pub(crate) async fn query_service_status(
         if let Some(cli_path) = cli_path {
             return cli_service_status(cli_path).await;
         }
-        return status;
+        status
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -260,6 +260,7 @@ fn parse_status_text_state(text: &str) -> Option<String> {
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn parse_sc_state(text: &str) -> Option<String> {
     text.lines()
         .find(|line| line.contains("STATE"))
@@ -267,6 +268,7 @@ fn parse_sc_state(text: &str) -> Option<String> {
         .map(|state| state.trim().to_ascii_uppercase())
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn parse_sc_binary_path(text: &str) -> Option<String> {
     text.lines().find_map(|line| {
         let trimmed = line.trim_start();
@@ -280,7 +282,7 @@ fn parse_sc_binary_path(text: &str) -> Option<String> {
     })
 }
 
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn parse_launchctl_print(text: &str) -> ServiceStatusInfo {
     let lower = text.to_ascii_lowercase();
     let state = text.lines().find_map(|line| {
