@@ -95,6 +95,19 @@ jobs:
             cp "$src" "$dst"
           fi
 
+      - name: Generate checksum
+        shell: bash
+        run: |
+          asset="easytier-pro-installer-${{ matrix.os }}-${{ matrix.arch }}"
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            asset="${asset}.exe"
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$asset" > "${asset}.sha256"
+          else
+            shasum -a 256 "$asset" > "${asset}.sha256"
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: easytier-pro-installer-${{ matrix.os }}-${{ matrix.arch }}

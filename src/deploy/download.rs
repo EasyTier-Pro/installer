@@ -1,7 +1,12 @@
 use crate::deploy::platform::{Platform, default_cache_dir};
+use anyhow::Context;
 use colored::Colorize;
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+const GITHUB_RELEASE_API: &str = "https://api.github.com/repos/EasyTier/EasyTier/releases/tags";
+const USER_AGENT: &str = "easytier-pro-installer";
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DownloadProgress {
@@ -46,6 +51,10 @@ pub(crate) fn build_download_url(platform: &Platform, version: &str, source: &st
             version, asset_name
         ),
     }
+}
+
+fn checksum_metadata_url(version: &str) -> String {
+    format!("{}/{}", GITHUB_RELEASE_API, normalize_version(version))
 }
 
 #[allow(dead_code)]
@@ -189,14 +198,14 @@ where
         .build()?;
 
     std::fs::create_dir_all(&cache_dir)?;
-    let zip_data = if archive_path.exists() {
-        if !quiet {
-            crate::style::info(&format!(
-                "使用缓存压缩包 {}",
-                archive_path.to_string_lossy().bright_white()
-            ));
-        }
-        let zip_data = std::fs::read(&archive_path)?;
+    let expected_sha256 =
+        fetch_expected_sha256(&client, &version, &asset_name, connect_timeout_secs)
+            .await
+            .with_context(|| format!("无法获取 {} 的 SHA-256 校验信息", asset_name))?;
+
+    let zip_data = if let Some(zip_data) =
+        read_verified_cache(&archive_path, &expected_sha256, &asset_name, quiet)?
+    {
         let size = zip_data.len() as u64;
         on_progress(DownloadProgress {
             downloaded: size,
@@ -250,6 +259,7 @@ where
             pb.finish_and_clear();
         }
 
+        verify_sha256(&zip_data, &expected_sha256, &asset_name)?;
         std::fs::write(&archive_path, &zip_data)?;
         if !quiet {
             crate::style::info(&format!(
@@ -283,6 +293,120 @@ where
     Ok((core_path, cli_path, version))
 }
 
+async fn fetch_expected_sha256(
+    client: &reqwest::Client,
+    version: &str,
+    asset_name: &str,
+    connect_timeout_secs: u64,
+) -> anyhow::Result<String> {
+    // EasyTier core releases expose authoritative per-asset checksums in the
+    // GitHub release metadata `digest` field (`sha256:<hex>`). Installer
+    // bootstrap binaries use sidecar `<asset>.sha256` checksum files.
+    let checksum_url = checksum_metadata_url(version);
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(connect_timeout_secs),
+        client
+            .get(&checksum_url)
+            .header(reqwest::header::USER_AGENT, USER_AGENT)
+            .send(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("校验信息请求超时"))??;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("校验信息下载失败 ({})", resp.status());
+    }
+
+    let metadata = resp.text().await?;
+    parse_github_release_sha256(&metadata, asset_name)
+}
+
+fn read_verified_cache(
+    archive_path: &Path,
+    expected_sha256: &str,
+    asset_name: &str,
+    quiet: bool,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    if !archive_path.exists() {
+        return Ok(None);
+    }
+
+    let zip_data = std::fs::read(archive_path)?;
+    match verify_sha256(&zip_data, expected_sha256, asset_name) {
+        Ok(()) => {
+            if !quiet {
+                crate::style::info(&format!(
+                    "使用已验证缓存压缩包 {}",
+                    archive_path.to_string_lossy().bright_white()
+                ));
+            }
+            Ok(Some(zip_data))
+        }
+        Err(err) => {
+            if !quiet {
+                crate::style::warning(&format!("缓存压缩包校验失败，重新下载: {}", err));
+            }
+            std::fs::remove_file(archive_path).with_context(|| {
+                format!("无法删除校验失败的缓存文件 {}", archive_path.display())
+            })?;
+            Ok(None)
+        }
+    }
+}
+
+fn parse_github_release_sha256(metadata: &str, asset_name: &str) -> anyhow::Result<String> {
+    let release: serde_json::Value = serde_json::from_str(metadata)?;
+    let assets = release
+        .get("assets")
+        .and_then(|assets| assets.as_array())
+        .ok_or_else(|| anyhow::anyhow!("release metadata 缺少 assets"))?;
+
+    for asset in assets {
+        let name = asset.get("name").and_then(|name| name.as_str());
+        if name != Some(asset_name) {
+            continue;
+        }
+
+        let digest = asset
+            .get("digest")
+            .and_then(|digest| digest.as_str())
+            .ok_or_else(|| anyhow::anyhow!("{} 缺少 digest 字段", asset_name))?;
+        let expected = digest
+            .strip_prefix("sha256:")
+            .ok_or_else(|| anyhow::anyhow!("{} digest 不是 SHA-256", asset_name))?;
+        validate_sha256_hex(expected)?;
+        return Ok(expected.to_ascii_lowercase());
+    }
+
+    anyhow::bail!("release metadata 中未找到 {}", asset_name)
+}
+
+fn verify_sha256(data: &[u8], expected_sha256: &str, asset_name: &str) -> anyhow::Result<()> {
+    validate_sha256_hex(expected_sha256)?;
+    let actual = sha256_hex(data);
+    if actual != expected_sha256.to_ascii_lowercase() {
+        anyhow::bail!(
+            "{} SHA-256 mismatch: expected {}, got {}",
+            asset_name,
+            expected_sha256,
+            actual
+        );
+    }
+    Ok(())
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    let digest = Sha256::digest(data);
+    digest.iter().map(|byte| format!("{:02x}", byte)).collect()
+}
+
+fn validate_sha256_hex(value: &str) -> anyhow::Result<()> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!("无效的 SHA-256 校验值: {}", value);
+    }
+    Ok(())
+}
+
 fn extract_zip(data: &[u8], dest: &Path) -> anyhow::Result<()> {
     let reader = std::io::Cursor::new(data);
     let mut archive = zip::ZipArchive::new(reader)?;
@@ -314,6 +438,73 @@ fn extract_zip(data: &[u8], dest: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_test_path(name: &str) -> PathBuf {
+        let unique = format!(
+            "easytier-download-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique).join(name)
+    }
+
+    #[test]
+    fn parses_matching_github_release_checksum() {
+        let metadata = r#"{
+            "assets": [
+                {
+                    "name": "easytier-linux-x86_64-v2.6.4.zip",
+                    "digest": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                }
+            ]
+        }"#;
+
+        let checksum =
+            parse_github_release_sha256(metadata, "easytier-linux-x86_64-v2.6.4.zip").unwrap();
+
+        assert_eq!(
+            checksum,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn rejects_checksum_mismatch() {
+        let expected = "0000000000000000000000000000000000000000000000000000000000000000";
+
+        let err = verify_sha256(b"abc", expected, "archive.zip").unwrap_err();
+
+        assert!(err.to_string().contains("SHA-256 mismatch"));
+    }
+
+    #[test]
+    fn accepts_matching_checksum() {
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+        verify_sha256(b"abc", expected, "archive.zip").unwrap();
+    }
+
+    #[test]
+    fn rejects_and_removes_corrupted_cache() {
+        let path = temp_test_path("archive.zip");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"corrupted").unwrap();
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+        let cached = read_verified_cache(&path, expected, "archive.zip", true).unwrap();
+
+        assert!(cached.is_none());
+        assert!(!path.exists());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 }
 
 fn find_package_root(

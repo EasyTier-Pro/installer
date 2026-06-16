@@ -3,6 +3,7 @@
 跨平台一键部署工具。运行后自动引导完成登录、获取注册密钥、下载 EasyTier、安装系统服务的全部流程。
 
 > **下载源说明**：install 脚本优先从 **Gitee** 下载 installer 二进制，若失败则自动回退到 GitHub。
+> **校验说明**：install 脚本会下载同 release 下的 `${asset}.sha256` checksum 文件，并用 SHA-256 验证 installer 二进制后才执行；installer 下载 EasyTier ZIP 时会校验 GitHub release metadata 中的 `digest` checksum。
 
 ## 快速安装
 

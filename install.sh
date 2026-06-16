@@ -69,6 +69,62 @@ download_cmd() {
     fi
 }
 
+verify_checksum() {
+    local file="$1"
+    local checksum_file="$2"
+    local asset="$3"
+    local expected=""
+    local candidate=""
+    local candidate_asset=""
+    local actual=""
+    local tool=""
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        set -- $line
+        if [ "$#" -eq 0 ]; then
+            continue
+        fi
+        candidate="$1"
+        candidate_asset="${2#\*}"
+        if [ -z "$candidate_asset" ] || [ "$candidate_asset" = "$asset" ]; then
+            expected="$candidate"
+            break
+        fi
+    done < "$checksum_file"
+
+    if [ "${#expected}" -ne 64 ]; then
+        echo "错误：$checksum_file 中未找到 $asset 的 SHA-256 checksum"
+        return 1
+    fi
+    case "$expected" in
+        *[!0123456789abcdefABCDEF]*)
+            echo "错误：$checksum_file 中的 SHA-256 checksum 无效"
+            return 1
+            ;;
+    esac
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        tool="sha256sum"
+        actual=$(sha256sum "$file")
+    elif command -v shasum >/dev/null 2>&1; then
+        tool="shasum"
+        actual=$(shasum -a 256 "$file")
+    else
+        echo "错误：需要 sha256sum 或 shasum 来验证 checksum"
+        return 1
+    fi
+    actual="${actual%% *}"
+
+    if [ "$actual" != "$expected" ]; then
+        echo "错误：$asset SHA-256 checksum 不匹配"
+        echo "  expected: $expected"
+        echo "  actual:   $actual"
+        return 1
+    fi
+
+    echo "checksum 验证通过 ($tool)"
+}
+
 # 获取最新版本
 echo "正在查询最新版本..."
 LATEST=$(download_cmd "$RELEASE_API_BASE/$REPO/releases/latest" /dev/stdout | grep -o '"tag_name":"[^"]*"' | head -n 1 | cut -d'"' -f4)
@@ -94,19 +150,35 @@ else
 fi
 
 URL="$RELEASE_DOWNLOAD_BASE/$REPO/releases/download/$LATEST/$ASSET"
+CHECKSUM_ASSET="$ASSET.sha256"
+CHECKSUM_URL="$URL.sha256"
 
 # 安装目录
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/easytier-pro-installer}"
 mkdir -p "$INSTALL_DIR"
 DEST="$INSTALL_DIR/$BIN_NAME"
 VERSION_FILE="$DEST.version"
+TMP_DEST="$DEST.tmp.$$"
+TMP_CHECKSUM="$TMP_DEST.sha256"
+
+cleanup_tmp() {
+    rm -f "$TMP_DEST" "$TMP_CHECKSUM"
+}
+trap cleanup_tmp EXIT
+
+echo "正在下载 checksum: $CHECKSUM_ASSET"
+download_cmd "$CHECKSUM_URL" "$TMP_CHECKSUM"
 
 # 检查本地缓存
 if [ -f "$DEST" ] && [ -f "$VERSION_FILE" ]; then
     LOCAL_VERSION=$(cat "$VERSION_FILE" 2>/dev/null || true)
     if [ "$LOCAL_VERSION" = "$LATEST" ]; then
-        echo "本地已是最新版本 $LATEST，跳过下载"
-        exec "$DEST" "$@"
+        if verify_checksum "$DEST" "$TMP_CHECKSUM" "$ASSET"; then
+            echo "本地已是最新版本 $LATEST，跳过下载"
+            exec "$DEST" "$@"
+        fi
+        echo "本地缓存校验失败，重新下载"
+        rm -f "$DEST" "$VERSION_FILE"
     fi
 fi
 
@@ -115,13 +187,13 @@ echo "目标路径: $DEST"
 echo "正在下载 $ASSET ($LATEST)..."
 echo "  来源: $URL"
 
-TMP_DEST="$DEST.tmp.$$"
 if command -v curl >/dev/null 2>&1; then
     curl -fSL --progress-bar "$URL" -o "$TMP_DEST"
 else
     wget -q --show-progress "$URL" -O "$TMP_DEST"
 fi
 
+verify_checksum "$TMP_DEST" "$TMP_CHECKSUM" "$ASSET"
 mv "$TMP_DEST" "$DEST"
 chmod +x "$DEST"
 echo "$LATEST" > "$VERSION_FILE"
