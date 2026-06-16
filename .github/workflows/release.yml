@@ -72,17 +72,17 @@ jobs:
 
       - name: Build (Linux, non-MIPS)
         if: matrix.os == 'linux' && !contains(matrix.target, 'mips')
-        run: cargo zigbuild --release --target ${{ matrix.target }}
+        run: cargo zigbuild --locked --release --target ${{ matrix.target }}
 
       - name: Build (MIPS)
         if: contains(matrix.target, 'mips')
         env:
           RUSTC_BOOTSTRAP: "1"
-        run: cargo build -Z build-std=std,panic_abort --release --target ${{ matrix.target }}
+        run: cargo build -Z build-std=std,panic_abort --locked --release --target ${{ matrix.target }}
 
       - name: Build (macOS / Windows)
         if: matrix.os != 'linux'
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Prepare binary
         shell: bash
