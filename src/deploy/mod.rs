@@ -127,31 +127,7 @@ pub(crate) fn ensure_desktop_purge_safe(
     install_dir: &Path,
     active_lock_dir: Option<&Path>,
 ) -> anyhow::Result<()> {
-    let install_dir = normalize_for_overlap_check(install_dir)?;
-    let default_lock_dir;
-    let active_lock_dir = match active_lock_dir {
-        Some(lock_dir) => lock_dir,
-        None => {
-            default_lock_dir = desktop_lifecycle_dir();
-            &default_lock_dir
-        }
-    };
-    let lock_dir = normalize_for_overlap_check(active_lock_dir)?;
-    if lock_dir.starts_with(&install_dir) {
-        anyhow::bail!("install_dir 不能是桌面端生命周期锁目录或其上级目录");
-    }
-    Ok(())
-}
-
-fn normalize_for_overlap_check(path: &Path) -> anyhow::Result<PathBuf> {
-    if let Ok(path) = std::fs::canonicalize(path) {
-        return Ok(path);
-    }
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        Ok(std::env::current_dir()?.join(path))
-    }
+    service::ensure_purge_safe(install_dir, &platform::default_cache_dir(), active_lock_dir)
 }
 
 pub(crate) fn core_binary_name() -> &'static str {

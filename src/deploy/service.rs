@@ -2,6 +2,8 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 pub(crate) const SERVICE_NAME: &str = "easytier-pro";
+const VERSION_FILE: &str = ".version";
+const MACHINE_ID_FILE: &str = ".machine-id";
 const BOOTSTRAP_FINGERPRINT_FILE: &str = ".bootstrap-fingerprint";
 const LEGACY_CORE_SERVICE_CONFIG_FILE: &str = "easytier-core-service.toml";
 
@@ -712,8 +714,10 @@ pub async fn run_uninstall(install_dir: Option<PathBuf>, purge: bool) -> anyhow:
     }
 
     if purge {
+        let cache_dir = super::platform::default_cache_dir();
+        ensure_purge_safe(&install_dir, &cache_dir, None)?;
         remove_install_dir(&install_dir)?;
-        remove_cache_dir(&super::platform::default_cache_dir())?;
+        remove_cache_dir(&cache_dir)?;
         crate::style::success("EasyTier 已彻底卸载并删除本地文件与缓存");
     } else {
         crate::style::success("EasyTier 服务已卸载，已保留本地文件和缓存");
@@ -862,6 +866,79 @@ pub(crate) fn remove_install_dir(install_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(crate) fn ensure_purge_safe(
+    install_dir: &Path,
+    cache_dir: &Path,
+    active_lock_dir: Option<&Path>,
+) -> anyhow::Result<()> {
+    let install_dir = normalize_for_purge_check(install_dir)?;
+
+    if install_dir.parent().is_none() {
+        anyhow::bail!("拒绝 purge: install_dir 不能是文件系统根目录");
+    }
+
+    let current_dir = normalize_for_purge_check(&std::env::current_dir()?)?;
+    if install_dir == current_dir {
+        anyhow::bail!("拒绝 purge: install_dir 不能是当前工作目录");
+    }
+
+    if let Some(base_dirs) = directories::BaseDirs::new() {
+        let home_dir = normalize_for_purge_check(base_dirs.home_dir())?;
+        if install_dir == home_dir {
+            anyhow::bail!("拒绝 purge: install_dir 不能是用户主目录");
+        }
+    }
+
+    let default_lock_dir;
+    let active_lock_dir = match active_lock_dir {
+        Some(lock_dir) => lock_dir,
+        None => {
+            default_lock_dir = super::desktop_lifecycle_dir();
+            &default_lock_dir
+        }
+    };
+    let lock_dir = normalize_for_purge_check(active_lock_dir)?;
+    if lock_dir.starts_with(&install_dir) || install_dir.starts_with(&lock_dir) {
+        anyhow::bail!("拒绝 purge: install_dir 不能是桌面端生命周期锁目录或其上级/下级目录");
+    }
+
+    if let Some(cache_parent) = cache_dir.parent() {
+        let cache_parent = normalize_for_purge_check(cache_parent)?;
+        if install_dir == cache_parent {
+            anyhow::bail!("拒绝 purge: install_dir 不能是默认缓存目录的上级目录");
+        }
+    }
+
+    if !is_easytier_managed_install(&install_dir) {
+        anyhow::bail!(
+            "拒绝 purge: install_dir 不是可识别的 EasyTier 安装目录，请检查 --install-dir"
+        );
+    }
+
+    Ok(())
+}
+
+fn normalize_for_purge_check(path: &Path) -> anyhow::Result<PathBuf> {
+    if let Ok(path) = std::fs::canonicalize(path) {
+        return Ok(path);
+    }
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+fn is_easytier_managed_install(install_dir: &Path) -> bool {
+    let has_expected_binaries = install_dir.join(super::core_binary_name()).is_file()
+        && install_dir.join(super::cli_binary_name()).is_file();
+    let has_existing_metadata = [VERSION_FILE, MACHINE_ID_FILE, BOOTSTRAP_FINGERPRINT_FILE]
+        .iter()
+        .any(|name| install_dir.join(name).is_file());
+
+    has_expected_binaries && has_existing_metadata
+}
+
 pub(crate) fn remove_cache_dir(cache_dir: &Path) -> anyhow::Result<()> {
     crate::style::debug(&format!("开始删除缓存目录: {}", cache_dir.display()));
     if !cache_dir.exists() {
@@ -884,6 +961,24 @@ pub(crate) fn remove_cache_dir(cache_dir: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unique_temp_path(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("{}-{}", prefix, uuid::Uuid::new_v4()))
+    }
+
+    fn create_owned_purge_install(prefix: &str) -> PathBuf {
+        let dir = unique_temp_path(prefix);
+        std::fs::create_dir_all(&dir).expect("create test install dir");
+        std::fs::write(dir.join(super::super::core_binary_name()), "").expect("write core");
+        std::fs::write(dir.join(super::super::cli_binary_name()), "").expect("write cli");
+        std::fs::write(dir.join(VERSION_FILE), "v1.0.0\n").expect("write version");
+        dir
+    }
+
+    fn isolated_cache_and_lock() -> (PathBuf, PathBuf) {
+        let base = unique_temp_path("easytier-purge-safety-context");
+        (base.join("cache").join("downloads"), base.join("locks"))
+    }
 
     #[test]
     fn service_install_args_use_core_cli_flags() {
@@ -1055,5 +1150,102 @@ secure-mode = true
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn purge_recognizes_existing_managed_install_markers() {
+        let dir = create_owned_purge_install("easytier-owned-install-test");
+
+        assert!(is_easytier_managed_install(&dir));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn purge_rejects_unowned_install_dir_without_markers() {
+        let dir = unique_temp_path("easytier-unowned-install-test");
+        std::fs::create_dir_all(&dir).expect("create test dir");
+
+        assert!(!is_easytier_managed_install(&dir));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn purge_allows_owned_install_dir() {
+        let dir = create_owned_purge_install("easytier-safe-purge-test");
+        let (cache_dir, lock_dir) = isolated_cache_and_lock();
+
+        ensure_purge_safe(&dir, &cache_dir, Some(&lock_dir)).expect("owned install is safe");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn purge_rejects_unowned_install_dir() {
+        let dir = unique_temp_path("easytier-unowned-purge-test");
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let (cache_dir, lock_dir) = isolated_cache_and_lock();
+
+        let err = ensure_purge_safe(&dir, &cache_dir, Some(&lock_dir)).unwrap_err();
+
+        assert!(err.to_string().contains("不是可识别的 EasyTier 安装目录"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn purge_rejects_filesystem_root() {
+        let (cache_dir, lock_dir) = isolated_cache_and_lock();
+
+        let err = ensure_purge_safe(Path::new("/"), &cache_dir, Some(&lock_dir)).unwrap_err();
+
+        assert!(err.to_string().contains("文件系统根目录"));
+    }
+
+    #[test]
+    fn purge_rejects_current_working_directory() {
+        let (cache_dir, lock_dir) = isolated_cache_and_lock();
+        let current_dir = std::env::current_dir().expect("current dir");
+
+        let err = ensure_purge_safe(&current_dir, &cache_dir, Some(&lock_dir)).unwrap_err();
+
+        assert!(err.to_string().contains("当前工作目录"));
+    }
+
+    #[test]
+    fn purge_rejects_home_directory_when_resolvable() {
+        let Some(base_dirs) = directories::BaseDirs::new() else {
+            return;
+        };
+        let (cache_dir, lock_dir) = isolated_cache_and_lock();
+
+        let err = ensure_purge_safe(base_dirs.home_dir(), &cache_dir, Some(&lock_dir)).unwrap_err();
+
+        assert!(err.to_string().contains("用户主目录"));
+    }
+
+    #[test]
+    fn purge_rejects_cache_parent() {
+        let base = unique_temp_path("easytier-cache-parent-purge-test");
+        let cache_dir = base.join("downloads");
+        let lock_dir = unique_temp_path("easytier-cache-parent-lock-test");
+
+        let err = ensure_purge_safe(&base, &cache_dir, Some(&lock_dir)).unwrap_err();
+
+        assert!(err.to_string().contains("默认缓存目录的上级目录"));
+    }
+
+    #[test]
+    fn purge_rejects_lock_directory_overlap() {
+        let base = unique_temp_path("easytier-lock-overlap-purge-test");
+        let lock_dir = base.join("locks");
+        let cache_dir = unique_temp_path("easytier-lock-overlap-cache-test").join("downloads");
+
+        let ancestor_err = ensure_purge_safe(&base, &cache_dir, Some(&lock_dir)).unwrap_err();
+        let descendant_err =
+            ensure_purge_safe(&lock_dir.join("child"), &cache_dir, Some(&lock_dir)).unwrap_err();
+
+        assert!(ancestor_err.to_string().contains("生命周期锁目录"));
+        assert!(descendant_err.to_string().contains("生命周期锁目录"));
     }
 }
