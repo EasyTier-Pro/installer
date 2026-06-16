@@ -429,7 +429,10 @@ async fn install_service_impl(
         if !quiet {
             crate::style::kv("服务名:", SERVICE_NAME);
             crate::style::kv("程序路径:", &core_path.to_string_lossy());
-            crate::style::kv("配置服务器:", config_url);
+            crate::style::kv(
+                "配置服务器:",
+                &crate::style::redact_config_server_url(config_url),
+            );
         }
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -632,7 +635,10 @@ pub async fn run_status(install_dir: Option<PathBuf>) -> anyhow::Result<()> {
     println!("state: {}", status.state.as_deref().unwrap_or("UNKNOWN"));
     println!("running: {}", status.running);
     if let Some(binary_path) = status.binary_path {
-        println!("binary_path: {}", binary_path);
+        println!(
+            "binary_path: {}",
+            crate::style::redact_sensitive_text(&binary_path)
+        );
     }
 
     Ok(())

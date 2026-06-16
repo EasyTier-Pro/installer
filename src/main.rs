@@ -23,7 +23,7 @@ async fn main() {
         style::debug(&format!("main 启动: 调试日志文件={}", path.display()));
         style::debug(&format!(
             "main 启动: 原始参数={:?}",
-            std::env::args().collect::<Vec<_>>()
+            style::redact_sensitive_args(&std::env::args().collect::<Vec<_>>())
         ));
     }
     style::debug("main 启动: CLI 参数解析完成");

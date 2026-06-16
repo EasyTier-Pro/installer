@@ -226,7 +226,10 @@ impl ConsoleClient {
         if crate::style::debug_enabled()
             && let Ok(json) = serde_json::to_string(body)
         {
-            crate::style::debug(&format!("API 请求 body: {}", json));
+            crate::style::debug(&format!(
+                "API 请求 body: {}",
+                crate::style::redact_sensitive_text(&json)
+            ));
         }
         self.send(method, path, |req| req.json(body)).await
     }
@@ -247,7 +250,11 @@ impl ConsoleClient {
 
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        crate::style::debug(&format!("API 响应 [{}]: {}", status, text));
+        crate::style::debug(&format!(
+            "API 响应 [{}]: {}",
+            status,
+            crate::style::redact_sensitive_text(&text)
+        ));
 
         if !status.is_success() {
             anyhow::bail!("请求失败 ({}): {}", status, text)
@@ -335,7 +342,11 @@ impl ConsoleClient {
         let resp = self.client.request(method, &url).send().await?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        crate::style::debug(&format!("API 公共响应 [{}]: {}", status, text));
+        crate::style::debug(&format!(
+            "API 公共响应 [{}]: {}",
+            status,
+            crate::style::redact_sensitive_text(&text)
+        ));
 
         if !status.is_success() {
             anyhow::bail!("请求失败 ({}): {}", status, text)

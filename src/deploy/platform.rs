@@ -165,7 +165,7 @@ fn relaunch_elevated_with_final_args(
         }
         crate::style::debug(&format!(
             "Windows 提权开始: 初始参数={:?}",
-            redact_sensitive_args(&args)
+            crate::style::redact_sensitive_args(&args)
         ));
         let has_install_dir_arg = args.iter().any(|arg| arg == "--install-dir" || arg == "-i");
         if !has_install_dir_arg {
@@ -184,13 +184,13 @@ fn relaunch_elevated_with_final_args(
         }
         crate::style::debug(&format!(
             "Windows 提权开始: 最终参数={:?}",
-            redact_sensitive_args(&args)
+            crate::style::redact_sensitive_args(&args)
         ));
 
         let params = format_windows_params(&args);
         crate::style::debug(&format!(
             "Windows 提权开始: 参数字符串={}",
-            format_windows_params(&redact_sensitive_args(&args))
+            format_windows_params(&crate::style::redact_sensitive_args(&args))
         ));
 
         let exe_wide: Vec<u16> = std::ffi::OsStr::new(&exe)
@@ -258,29 +258,6 @@ fn relaunch_elevated_with_final_args(
             Ok(std::process::ExitStatus::from_raw(exit_code))
         }
     }
-}
-
-#[cfg_attr(not(windows), allow(dead_code))]
-fn redact_sensitive_args(args: &[String]) -> Vec<String> {
-    let mut redacted = Vec::with_capacity(args.len());
-    let mut redact_next = false;
-    for arg in args {
-        if redact_next {
-            redacted.push("<redacted>".to_string());
-            redact_next = false;
-            continue;
-        }
-
-        if arg == "--service-config-url" {
-            redacted.push(arg.clone());
-            redact_next = true;
-        } else if arg.starts_with("--service-config-url=") {
-            redacted.push("--service-config-url=<redacted>".to_string());
-        } else {
-            redacted.push(arg.clone());
-        }
-    }
-    redacted
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -388,7 +365,7 @@ mod tests {
         ];
 
         assert_eq!(
-            redact_sensitive_args(&args),
+            crate::style::redact_sensitive_args(&args),
             vec![
                 "install-service".to_string(),
                 "--service-config-url".to_string(),

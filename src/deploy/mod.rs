@@ -547,7 +547,10 @@ pub(crate) async fn run_deploy(
         config_server.trim_end_matches('/'),
         bootstrap_token
     );
-    crate::style::kv("配置服务器:", &full_config_url);
+    crate::style::kv(
+        "配置服务器:",
+        &crate::style::redact_config_server_url(&full_config_url),
+    );
     println!();
 
     // 4. 检测平台并下载 easytier
@@ -665,6 +668,10 @@ pub(crate) async fn run_desktop_status(
     let config_server_match = expected_config_url
         .as_ref()
         .and_then(|expected| service_config_matches(service_status.binary_path.as_ref(), expected));
+    let binary_path = service_status
+        .binary_path
+        .as_deref()
+        .map(crate::style::redact_sensitive_text);
     let ready = service_status.installed
         && service_status.running
         && binaries_present
@@ -680,7 +687,7 @@ pub(crate) async fn run_desktop_status(
             "installed": service_status.installed,
             "running": service_status.running,
             "service_state": service_status.state,
-            "binary_path": service_status.binary_path,
+            "binary_path": binary_path,
             "machine_id": machine_id,
             "core_path": core_path.to_string_lossy(),
             "cli_path": cli_path.to_string_lossy(),
