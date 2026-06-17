@@ -358,16 +358,11 @@ fn key_value_line(text: &str, key: &str) -> Option<String> {
 
 #[cfg_attr(windows, allow(dead_code))]
 fn parse_systemctl_exec_path(value: &str) -> Option<String> {
-    let start = value.find("path=")? + "path=".len();
-    let rest = &value[start..];
-    let end = rest
-        .find(|ch: char| ch.is_whitespace() || ch == ';')
-        .unwrap_or(rest.len());
-    let path = rest[..end].trim();
-    if path.is_empty() {
+    let value = value.trim();
+    if value.is_empty() {
         None
     } else {
-        Some(path.to_string())
+        Some(value.to_string())
     }
 }
 
@@ -1068,7 +1063,10 @@ ExecStart={ path=/opt/easytier/easytier-core ; argv[]=/opt/easytier/easytier-cor
         assert_eq!(status.state, Some("ACTIVE".to_string()));
         assert_eq!(
             status.binary_path,
-            Some("/opt/easytier/easytier-core".to_string())
+            Some(
+                "{ path=/opt/easytier/easytier-core ; argv[]=/opt/easytier/easytier-core --config-server tcp://console/token ; }"
+                    .to_string()
+            )
         );
     }
 

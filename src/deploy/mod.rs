@@ -203,6 +203,13 @@ fn service_config_matches(binary_path: Option<&String>, expected_config_url: &st
     }
 }
 
+fn service_config_ready(
+    expected_config_url: Option<&String>,
+    config_server_match: Option<bool>,
+) -> bool {
+    expected_config_url.is_none() || config_server_match == Some(true)
+}
+
 fn machine_id_from_service_args(binary_path: Option<&String>) -> Option<String> {
     let binary_path = binary_path?;
     let mut parts = binary_path.split_whitespace();
@@ -644,6 +651,8 @@ pub(crate) async fn run_desktop_status(
     let config_server_match = expected_config_url
         .as_ref()
         .and_then(|expected| service_config_matches(service_status.binary_path.as_ref(), expected));
+    let config_server_ready =
+        service_config_ready(expected_config_url.as_ref(), config_server_match);
     let binary_path = service_status
         .binary_path
         .as_deref()
@@ -653,7 +662,7 @@ pub(crate) async fn run_desktop_status(
         && binaries_present
         && identity_match.unwrap_or(true)
         && version_match.unwrap_or(true)
-        && config_server_match.unwrap_or(true);
+        && config_server_ready;
 
     emit(
         "finished",
@@ -743,7 +752,7 @@ pub(crate) async fn run_desktop_install(
     }
     let config_server_match =
         service_config_matches(service_status.binary_path.as_ref(), &full_config_url)
-            .unwrap_or(true);
+            .unwrap_or(false);
 
     emit(
         "identity_evaluated",
@@ -1551,6 +1560,19 @@ mod tests {
             ),
             Some(false)
         );
+    }
+
+    #[test]
+    fn service_config_match_unknown_is_not_ready_when_requested() {
+        let expected_config_url = "tcp://console/token".to_string();
+
+        assert!(!service_config_ready(Some(&expected_config_url), None));
+        assert!(!service_config_ready(
+            Some(&expected_config_url),
+            Some(false)
+        ));
+        assert!(service_config_ready(Some(&expected_config_url), Some(true)));
+        assert!(service_config_ready(None, None));
     }
 
     #[test]
