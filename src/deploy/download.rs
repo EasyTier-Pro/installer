@@ -456,6 +456,169 @@ mod tests {
         std::env::temp_dir().join(unique).join(name)
     }
 
+    fn test_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut archive = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+
+        for (path, contents) in entries {
+            archive.start_file(path, options).unwrap();
+            archive.write_all(contents).unwrap();
+        }
+
+        archive.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn normalizes_version_prefix() {
+        assert_eq!(normalize_version("2.6.4"), "v2.6.4");
+        assert_eq!(normalize_version("v2.6.4"), "v2.6.4");
+    }
+
+    #[test]
+    fn builds_asset_name_for_macos() {
+        let platform = Platform {
+            os: "darwin",
+            arch: "aarch64",
+        };
+
+        assert_eq!(
+            asset_name(&platform, "2.6.4"),
+            "easytier-macos-aarch64-v2.6.4.zip"
+        );
+    }
+
+    #[test]
+    fn builds_asset_name_with_platform_arch() {
+        let platform = Platform {
+            os: "linux",
+            arch: "riscv64",
+        };
+
+        assert_eq!(
+            asset_name(&platform, "v2.6.4"),
+            "easytier-linux-riscv64-v2.6.4.zip"
+        );
+    }
+
+    #[test]
+    fn builds_download_urls_for_known_sources() {
+        let platform = Platform {
+            os: "linux",
+            arch: "x86_64",
+        };
+
+        assert_eq!(
+            build_download_url(&platform, "v2.6.4", "github"),
+            "https://github.com/EasyTier/EasyTier/releases/download/v2.6.4/easytier-linux-x86_64-v2.6.4.zip"
+        );
+        assert_eq!(
+            build_download_url(&platform, "v2.6.4", "github_proxy"),
+            "https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/download/v2.6.4/easytier-linux-x86_64-v2.6.4.zip"
+        );
+        assert_eq!(
+            build_download_url(&platform, "v2.6.4", "github-proxy"),
+            "https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/download/v2.6.4/easytier-linux-x86_64-v2.6.4.zip"
+        );
+        assert_eq!(
+            build_download_url(&platform, "v2.6.4", "gitee"),
+            "https://gitee.com/EasyTier/EasyTier/releases/download/v2.6.4/easytier-linux-x86_64-v2.6.4.zip"
+        );
+    }
+
+    #[test]
+    fn extract_zip_finds_package_root_at_archive_root() {
+        let extract_dir = temp_test_path("extract-root");
+        std::fs::create_dir_all(&extract_dir).unwrap();
+        let core_name = crate::deploy::core_binary_name();
+        let cli_name = crate::deploy::cli_binary_name();
+        let archive = test_zip(&[(core_name, b"core".as_ref()), (cli_name, b"cli".as_ref())]);
+
+        extract_zip(&archive, &extract_dir).unwrap();
+        let package_root = find_package_root(&extract_dir, core_name, cli_name).unwrap();
+
+        assert_eq!(package_root, Some(extract_dir.clone()));
+        assert_eq!(
+            std::fs::read_to_string(extract_dir.join(core_name)).unwrap(),
+            "core"
+        );
+        assert_eq!(
+            std::fs::read_to_string(extract_dir.join(cli_name)).unwrap(),
+            "cli"
+        );
+        let _ = std::fs::remove_dir_all(extract_dir.parent().unwrap());
+    }
+
+    #[test]
+    fn extract_zip_finds_package_root_in_top_level_directory() {
+        let extract_dir = temp_test_path("extract-nested");
+        std::fs::create_dir_all(&extract_dir).unwrap();
+        let core_name = crate::deploy::core_binary_name();
+        let cli_name = crate::deploy::cli_binary_name();
+        let core_path = format!("package/{core_name}");
+        let cli_path = format!("package/{cli_name}");
+        let archive = test_zip(&[(&core_path, b"core".as_ref()), (&cli_path, b"cli".as_ref())]);
+
+        extract_zip(&archive, &extract_dir).unwrap();
+        let package_root = find_package_root(&extract_dir, core_name, cli_name).unwrap();
+
+        assert_eq!(package_root, Some(extract_dir.join("package")));
+        let _ = std::fs::remove_dir_all(extract_dir.parent().unwrap());
+    }
+
+    #[test]
+    fn extract_zip_rejects_invalid_zip_bytes() {
+        let extract_dir = temp_test_path("extract-invalid");
+        std::fs::create_dir_all(&extract_dir).unwrap();
+
+        let err = extract_zip(b"not a zip", &extract_dir).unwrap_err();
+
+        assert!(!err.to_string().is_empty());
+        let _ = std::fs::remove_dir_all(extract_dir.parent().unwrap());
+    }
+
+    #[test]
+    fn find_package_root_returns_none_when_binaries_are_missing() {
+        let extract_dir = temp_test_path("extract-missing");
+        std::fs::create_dir_all(&extract_dir).unwrap();
+        let core_name = crate::deploy::core_binary_name();
+        let cli_name = crate::deploy::cli_binary_name();
+
+        let package_root = find_package_root(&extract_dir, core_name, cli_name).unwrap();
+
+        assert_eq!(package_root, None);
+        let _ = std::fs::remove_dir_all(extract_dir.parent().unwrap());
+    }
+
+    #[test]
+    fn sync_dir_contents_copies_nested_overwrites_and_preserves_files() {
+        let root = temp_test_path("sync-dir-contents");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(src.join("nested")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("nested/copied.txt"), "copied").unwrap();
+        std::fs::write(src.join("overwritten.txt"), "new").unwrap();
+        std::fs::write(dst.join("overwritten.txt"), "old").unwrap();
+        std::fs::write(dst.join("preserved.txt"), "preserved").unwrap();
+
+        sync_dir_contents(&src, &dst).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dst.join("nested/copied.txt")).unwrap(),
+            "copied"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("overwritten.txt")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("preserved.txt")).unwrap(),
+            "preserved"
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
     #[test]
     fn parses_matching_github_release_checksum() {
         let metadata = r#"{
