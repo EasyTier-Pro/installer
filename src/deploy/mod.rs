@@ -1687,6 +1687,11 @@ mod tests {
         std::fs::write(install_dir.join(core_binary_name()), b"old core").unwrap();
         std::fs::write(install_dir.join(cli_binary_name()), b"old cli").unwrap();
         std::fs::write(install_dir.join(".version"), b"old version").unwrap();
+        std::fs::write(
+            install_dir.join(".bootstrap-fingerprint"),
+            b"old fingerprint",
+        )
+        .unwrap();
 
         let backup = create_update_backup(&install_dir).unwrap();
 
@@ -1702,7 +1707,11 @@ mod tests {
             std::fs::read(backup.backup_dir.join(".version")).unwrap(),
             b"old version"
         );
-        assert_eq!(backup.protected_files.len(), 3);
+        assert_eq!(
+            std::fs::read(backup.backup_dir.join(".bootstrap-fingerprint")).unwrap(),
+            b"old fingerprint"
+        );
+        assert_eq!(backup.protected_files.len(), 4);
 
         let _ = cleanup_update_backup(backup);
         let _ = std::fs::remove_dir_all(install_dir);
@@ -1714,11 +1723,21 @@ mod tests {
         std::fs::write(install_dir.join(core_binary_name()), b"old core").unwrap();
         std::fs::write(install_dir.join(cli_binary_name()), b"old cli").unwrap();
         std::fs::write(install_dir.join(".version"), b"old version").unwrap();
+        std::fs::write(
+            install_dir.join(".bootstrap-fingerprint"),
+            b"old fingerprint",
+        )
+        .unwrap();
         let backup = create_update_backup(&install_dir).unwrap();
 
         std::fs::write(install_dir.join(core_binary_name()), b"broken core").unwrap();
         std::fs::write(install_dir.join(cli_binary_name()), b"broken cli").unwrap();
         std::fs::write(install_dir.join(".version"), b"broken version").unwrap();
+        std::fs::write(
+            install_dir.join(".bootstrap-fingerprint"),
+            b"broken fingerprint",
+        )
+        .unwrap();
 
         restore_update_backup(&install_dir, &backup).unwrap();
 
@@ -1733,6 +1752,10 @@ mod tests {
         assert_eq!(
             std::fs::read(install_dir.join(".version")).unwrap(),
             b"old version"
+        );
+        assert_eq!(
+            std::fs::read(install_dir.join(".bootstrap-fingerprint")).unwrap(),
+            b"old fingerprint"
         );
 
         let _ = cleanup_update_backup(backup);
