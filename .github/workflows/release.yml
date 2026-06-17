@@ -41,10 +41,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        if: ${{ !contains(matrix.target, 'mips') }}
         with:
-          targets: ${{ !contains(matrix.target, 'mips') && matrix.target || '' }}
-          components: ${{ contains(matrix.target, 'mips') && 'rust-src' || '' }}
+          toolchain: 1.96.0
+          targets: ${{ matrix.target }}
+
+      - uses: dtolnay/rust-toolchain@master
+        if: ${{ contains(matrix.target, 'mips') }}
+        with:
+          toolchain: nightly-2026-04-21
+          components: rust-src
 
       - name: Install zig
         if: matrix.os == 'linux' && !contains(matrix.target, 'mips')
@@ -80,7 +87,6 @@ jobs:
         if: contains(matrix.target, 'mips')
         env:
           EASYTIER_INSTALLER_ARCH: ${{ matrix.arch }}
-          RUSTC_BOOTSTRAP: "1"
         run: cargo build -Z build-std=std,panic_abort --locked --release --target ${{ matrix.target }}
 
       - name: Build (macOS / Windows)

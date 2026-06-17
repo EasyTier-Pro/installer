@@ -2,6 +2,7 @@
 name = "easytier-pro-installer"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.96"
 
 [dependencies]
 anyhow = "1.0"

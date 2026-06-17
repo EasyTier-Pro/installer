@@ -183,8 +183,10 @@ easytier-pro-installer desktop uninstall --json
 
 ## 构建
 
+项目固定使用 `rust-toolchain.toml` 中的 Rust 版本；安装 `rustup` 后，`cargo` 会自动读取该文件并安装所需的 `rustfmt`、`clippy` 组件。
+Release 中的 MIPS 目标因 `-Z build-std` 使用单独固定的 `nightly-2026-04-21` toolchain。
+
 ```bash
-cd agent
 cargo build --release
 ```
 
