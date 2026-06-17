@@ -127,6 +127,9 @@ EasyTier 已就绪: ...
 # 查看服务状态
 ~/.local/share/easytier-pro-installer/easytier-pro-installer status
 
+# 输出机器可读 JSON 状态
+~/.local/share/easytier-pro-installer/easytier-pro-installer status --json
+
 # 卸载服务，保留已下载文件和缓存
 ~/.local/share/easytier-pro-installer/easytier-pro-installer uninstall
 
@@ -149,7 +152,37 @@ EasyTier 已就绪: ...
 |--------|------|----------|------|
 | `install` | `-v, --version` | `EASYTIER_VERSION` | 指定安装的 EasyTier 版本号 |
 | `update` | `-v, --version` | `EASYTIER_VERSION` | 指定更新到的 EasyTier 版本号 |
+| `status` | `--json` | - | 输出机器可读 JSON 状态对象 |
 | `uninstall` | `--purge` | - | 彻底删除安装目录和缓存压缩包 |
+
+### JSON 状态输出
+
+`status --json` 会向 `stdout` 输出单个 JSON object，便于脚本和运维系统读取。普通 `status` 在服务未安装时仍返回错误；`status --json` 会返回 `installed: false`、`running: false`、`ready: false`，以便自动化逻辑检查当前状态。
+
+示例：
+
+```bash
+~/.local/share/easytier-pro-installer/easytier-pro-installer status --json
+```
+
+主要字段：
+
+| 字段 | 说明 |
+|------|------|
+| `install_dir` | 安装目录 |
+| `service_name` | 系统服务名，当前为 `easytier-pro` |
+| `installed` | 服务是否已安装 |
+| `running` | 服务是否正在运行 |
+| `service_state` | 平台返回的服务状态；无法获取时为 `null` |
+| `binary_path` | 已脱敏的服务启动命令或路径；不会输出原始注册密钥 |
+| `core_path` | 预期的 `easytier-core` 路径 |
+| `cli_path` | 预期的 `easytier-cli` 路径 |
+| `binaries_present` | core 和 cli 二进制是否都存在 |
+| `version` | 已安装 core 版本；无法读取时为 `null` |
+| `machine_id` | 本机 machine id；无法读取时为 `null` |
+| `ready` | 当前可计算的就绪状态，要求服务已安装、正在运行且二进制存在 |
+
+兼容性约定：`status --json` 是机器可读接口；后续版本可能新增字段，但不会重命名或删除已记录字段。客户端应忽略未知字段。
 
 ## 桌面端集成
 

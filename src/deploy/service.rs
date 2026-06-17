@@ -17,6 +17,22 @@ pub(crate) struct ServiceStatusInfo {
     pub binary_path: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct StatusJson {
+    pub install_dir: String,
+    pub service_name: &'static str,
+    pub installed: bool,
+    pub running: bool,
+    pub service_state: Option<String>,
+    pub binary_path: Option<String>,
+    pub core_path: String,
+    pub cli_path: String,
+    pub binaries_present: bool,
+    pub version: Option<String>,
+    pub machine_id: Option<String>,
+    pub ready: bool,
+}
+
 pub(crate) fn service_not_installed(output: &std::process::Output) -> bool {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -619,10 +635,16 @@ fn hash_bootstrap_token(token: &str) -> String {
     out
 }
 
-pub async fn run_status(install_dir: Option<PathBuf>) -> anyhow::Result<()> {
+pub async fn run_status(install_dir: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
     let install_dir = install_dir.unwrap_or_else(super::platform::default_install_dir);
     let cli_path = find_easytier_cli(&install_dir).ok();
     let status = query_service_status(&install_dir, cli_path.as_deref()).await;
+
+    if json {
+        let status_json = build_status_json(&install_dir, status);
+        println!("{}", serde_json::to_string(&status_json)?);
+        return Ok(());
+    }
 
     if !status.installed {
         anyhow::bail!("EasyTier service is not installed");
@@ -639,6 +661,66 @@ pub async fn run_status(install_dir: Option<PathBuf>) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+pub(crate) fn build_status_json(install_dir: &Path, status: ServiceStatusInfo) -> StatusJson {
+    let core_path = install_dir.join(super::core_binary_name());
+    let cli_path = install_dir.join(super::cli_binary_name());
+    let binaries_present = core_path.exists() && cli_path.exists();
+    let version = if core_path.exists() {
+        get_core_version(&core_path)
+    } else {
+        None
+    };
+    let machine_id = read_machine_id(install_dir)
+        .or_else(|| machine_id_from_service_args(status.binary_path.as_ref()));
+    let binary_path = status
+        .binary_path
+        .as_deref()
+        .map(crate::style::redact_sensitive_text);
+    let ready = status.installed && status.running && binaries_present;
+
+    StatusJson {
+        install_dir: install_dir.to_string_lossy().to_string(),
+        service_name: SERVICE_NAME,
+        installed: status.installed,
+        running: status.running,
+        service_state: status.state,
+        binary_path,
+        core_path: core_path.to_string_lossy().to_string(),
+        cli_path: cli_path.to_string_lossy().to_string(),
+        binaries_present,
+        version,
+        machine_id,
+        ready,
+    }
+}
+
+fn read_machine_id(install_dir: &Path) -> Option<String> {
+    let id = std::fs::read_to_string(install_dir.join(MACHINE_ID_FILE))
+        .ok()?
+        .trim()
+        .to_string();
+    if id.is_empty() { None } else { Some(id) }
+}
+
+fn machine_id_from_service_args(binary_path: Option<&String>) -> Option<String> {
+    let binary_path = binary_path?;
+    let mut parts = binary_path.split_whitespace();
+    while let Some(part) = parts.next() {
+        if let Some(value) = part.strip_prefix("--machine-id=")
+            && !value.trim().is_empty()
+        {
+            return Some(value.trim().to_string());
+        }
+        if part == "--machine-id" {
+            let value = parts.next()?.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
 }
 
 #[allow(dead_code)]
@@ -1046,6 +1128,58 @@ SERVICE_NAME: easytier-pro
             status.binary_path,
             Some("/usr/local/easytier/easytier-core".to_string())
         );
+    }
+
+    #[test]
+    fn serializes_status_json_shape_without_raw_credentials() {
+        let install_dir = unique_temp_path("easytier-status-json");
+        std::fs::create_dir_all(&install_dir).expect("create install dir");
+        std::fs::write(install_dir.join(super::super::core_binary_name()), "").expect("write core");
+        std::fs::write(install_dir.join(super::super::cli_binary_name()), "").expect("write cli");
+        std::fs::write(install_dir.join(MACHINE_ID_FILE), "machine-1\n").expect("write machine id");
+
+        let status = build_status_json(
+            &install_dir,
+            ServiceStatusInfo {
+                installed: true,
+                running: true,
+                state: Some("RUNNING".to_string()),
+                binary_path: Some(
+                    "easytier-core --config-server tcp://console.easytier.cn:22020/secret-token"
+                        .to_string(),
+                ),
+            },
+        );
+        let value = serde_json::to_value(&status).expect("serialize status json");
+
+        assert_eq!(value["service_name"], SERVICE_NAME);
+        assert_eq!(value["installed"], true);
+        assert_eq!(value["running"], true);
+        assert_eq!(value["service_state"], "RUNNING");
+        assert_eq!(value["binaries_present"], true);
+        assert_eq!(value["machine_id"], "machine-1");
+        assert_eq!(value["ready"], true);
+        assert!(
+            value["binary_path"]
+                .as_str()
+                .unwrap()
+                .contains("<redacted>")
+        );
+        assert!(!value.to_string().contains("secret-token"));
+
+        std::fs::remove_dir_all(&install_dir).expect("remove install dir");
+    }
+
+    #[test]
+    fn status_json_reports_not_ready_when_service_missing() {
+        let install_dir = unique_temp_path("easytier-status-json-missing");
+        let status = build_status_json(&install_dir, ServiceStatusInfo::default());
+        let value = serde_json::to_value(&status).expect("serialize status json");
+
+        assert_eq!(value["installed"], false);
+        assert_eq!(value["running"], false);
+        assert_eq!(value["binaries_present"], false);
+        assert_eq!(value["ready"], false);
     }
 
     #[test]

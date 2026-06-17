@@ -40,7 +40,7 @@ pub enum Command {
     Uninstall(UninstallArgs),
 
     /// 查看服务状态
-    Status,
+    Status(StatusArgs),
 
     /// 面向桌面端的 JSON 子进程协议
     #[command(subcommand, hide = true)]
@@ -73,6 +73,13 @@ pub struct UninstallArgs {
     /// 彻底删除安装目录和缓存压缩包
     #[arg(long)]
     pub purge: bool,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct StatusArgs {
+    /// 以 JSON 对象输出机器可读状态
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -157,7 +164,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Install(args) => run_install(cli, args).await,
         Command::Update(args) => run_update(cli, args).await,
         Command::Uninstall(args) => run_uninstall(cli, args).await,
-        Command::Status => deploy::run_status(cli.install_dir).await,
+        Command::Status(args) => deploy::run_status(cli.install_dir, args.json).await,
         Command::Desktop(command) => desktop::run(cli, command).await,
         Command::InstallService(args) => run_install_service(cli, args).await,
         Command::UpgradeService(args) => run_upgrade_service(cli, args).await,
@@ -457,7 +464,20 @@ mod tests {
     fn parses_status_subcommand() {
         let cli = Cli::parse_from(["easytier-pro-installer", "status"]);
 
-        assert!(matches!(cli.command, Some(Command::Status)));
+        let Some(Command::Status(args)) = cli.command else {
+            panic!("expected status command");
+        };
+        assert!(!args.json);
+    }
+
+    #[test]
+    fn parses_status_json_subcommand() {
+        let cli = Cli::parse_from(["easytier-pro-installer", "status", "--json"]);
+
+        let Some(Command::Status(args)) = cli.command else {
+            panic!("expected status command");
+        };
+        assert!(args.json);
     }
 
     #[test]
