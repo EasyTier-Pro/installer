@@ -33,6 +33,11 @@ struct DesktopPreparedUpdate {
     version: String,
 }
 
+struct UpdateBackup {
+    backup_dir: PathBuf,
+    protected_files: Vec<PathBuf>,
+}
+
 impl Drop for DesktopPreparedUpdate {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.staging_dir);
@@ -1001,6 +1006,7 @@ pub(crate) async fn run_desktop_update(
             .await?;
 
     stop_service_for_update(&current_cli_path).await?;
+    let backup = create_update_backup(&install_dir)?;
     let update_result = async {
         let (_, cli_path) = install_prepared_desktop_update(&package, &install_dir)?;
         start_service_strict(&cli_path).await?;
@@ -1008,9 +1014,10 @@ pub(crate) async fn run_desktop_update(
     }
     .await;
     if let Err(err) = update_result {
-        restart_existing_service_after_failed_update(&install_dir, &current_cli_path).await;
-        return Err(err);
+        return rollback_desktop_update_after_failure(&install_dir, &current_cli_path, backup, err)
+            .await;
     }
+    cleanup_update_backup(backup)?;
     emit(
         "service_started",
         serde_json::json!({
@@ -1060,15 +1067,17 @@ pub(crate) async fn run_desktop_update_service(
         prepare_desktop_update_package_quiet(&platform, &install_dir, &target_version).await?;
 
     stop_service_for_update(&current_cli_path).await?;
+    let backup = create_update_backup(&install_dir)?;
     let update_result = async {
         let (_, cli_path) = install_prepared_desktop_update(&package, &install_dir)?;
         start_service_strict(&cli_path).await
     }
     .await;
     if let Err(err) = update_result {
-        restart_existing_service_after_failed_update(&install_dir, &current_cli_path).await;
-        return Err(err);
+        return rollback_desktop_update_after_failure(&install_dir, &current_cli_path, backup, err)
+            .await;
     }
+    cleanup_update_backup(backup)?;
     Ok(())
 }
 
@@ -1269,6 +1278,57 @@ fn desktop_update_staging_dir(install_dir: &Path) -> PathBuf {
     install_dir.join(".desktop-update-tmp")
 }
 
+fn protected_update_files() -> [PathBuf; 4] {
+    [
+        PathBuf::from(core_binary_name()),
+        PathBuf::from(cli_binary_name()),
+        PathBuf::from(".version"),
+        PathBuf::from(".bootstrap-fingerprint"),
+    ]
+}
+
+fn create_update_backup(install_dir: &Path) -> anyhow::Result<UpdateBackup> {
+    let backup_dir = install_dir.join(format!(".desktop-update-backup-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&backup_dir)?;
+    let mut protected_files = Vec::new();
+
+    for relative_path in protected_update_files() {
+        let source = install_dir.join(&relative_path);
+        if source.is_file() {
+            let destination = backup_dir.join(&relative_path);
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&source, &destination)?;
+            protected_files.push(relative_path);
+        }
+    }
+
+    Ok(UpdateBackup {
+        backup_dir,
+        protected_files,
+    })
+}
+
+fn restore_update_backup(install_dir: &Path, backup: &UpdateBackup) -> anyhow::Result<()> {
+    for relative_path in &backup.protected_files {
+        let source = backup.backup_dir.join(relative_path);
+        let destination = install_dir.join(relative_path);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&source, &destination)?;
+    }
+    Ok(())
+}
+
+fn cleanup_update_backup(backup: UpdateBackup) -> anyhow::Result<()> {
+    if backup.backup_dir.exists() {
+        std::fs::remove_dir_all(backup.backup_dir)?;
+    }
+    Ok(())
+}
+
 fn remove_existing_staging_dir(staging_dir: &Path) -> anyhow::Result<()> {
     if staging_dir.exists() {
         std::fs::remove_dir_all(staging_dir)?;
@@ -1301,6 +1361,23 @@ async fn restart_existing_service_after_failed_update(
     let _ = start_service_strict(&cli_path).await;
 }
 
+async fn rollback_desktop_update_after_failure(
+    install_dir: &Path,
+    fallback_cli_path: &Path,
+    backup: UpdateBackup,
+    update_error: anyhow::Error,
+) -> anyhow::Result<()> {
+    if let Err(rollback_error) = restore_update_backup(install_dir, &backup) {
+        return Err(update_error.context(format!(
+            "update failed; rollback was attempted but failed: {rollback_error:#}"
+        )));
+    }
+
+    let _ = cleanup_update_backup(backup);
+    restart_existing_service_after_failed_update(install_dir, fallback_cli_path).await;
+    Err(update_error.context("update failed; rollback was attempted and restored previous files"))
+}
+
 async fn stop_service_for_update(cli_path: &Path) -> anyhow::Result<()> {
     let stop = tokio::process::Command::new(cli_path)
         .args(["service", "--name", service::SERVICE_NAME, "stop"])
@@ -1331,6 +1408,10 @@ async fn start_service_strict(cli_path: &Path) -> anyhow::Result<()> {
     } else {
         anyhow::bail!("启动服务失败: {}", stderr.trim())
     }
+}
+
+fn service_start_succeeded_or_already_running(status_success: bool, stderr: &str) -> bool {
+    status_success || stderr.contains("already running")
 }
 
 pub(crate) async fn run_upgrade_from_console(
@@ -1430,10 +1511,14 @@ pub(crate) async fn run_upgrade(install_dir: &Path, target_version: &str) -> any
         if !stderr.is_empty() {
             println!("  {}", stderr.trim());
         }
-        if stderr.contains("already running") {
+        if service_start_succeeded_or_already_running(false, &stderr) {
             crate::style::success("服务已重启");
         } else {
             crate::style::warning("启动失败，请尝试重新部署");
+            if stderr.trim().is_empty() {
+                anyhow::bail!("启动服务失败，请尝试重新部署");
+            }
+            anyhow::bail!("启动服务失败: {}", stderr.trim());
         }
     }
 
@@ -1587,5 +1672,117 @@ mod tests {
             machine_id_from_service_args(Some(&"easytier-core --machine-id=machine-2".to_string())),
             Some("machine-2".to_string())
         );
+    }
+
+    fn temp_update_test_dir() -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("easytier-update-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("create temp install dir");
+        path
+    }
+
+    #[test]
+    fn update_backup_copies_existing_core_cli_and_version() {
+        let install_dir = temp_update_test_dir();
+        std::fs::write(install_dir.join(core_binary_name()), b"old core").unwrap();
+        std::fs::write(install_dir.join(cli_binary_name()), b"old cli").unwrap();
+        std::fs::write(install_dir.join(".version"), b"old version").unwrap();
+
+        let backup = create_update_backup(&install_dir).unwrap();
+
+        assert_eq!(
+            std::fs::read(backup.backup_dir.join(core_binary_name())).unwrap(),
+            b"old core"
+        );
+        assert_eq!(
+            std::fs::read(backup.backup_dir.join(cli_binary_name())).unwrap(),
+            b"old cli"
+        );
+        assert_eq!(
+            std::fs::read(backup.backup_dir.join(".version")).unwrap(),
+            b"old version"
+        );
+        assert_eq!(backup.protected_files.len(), 3);
+
+        let _ = cleanup_update_backup(backup);
+        let _ = std::fs::remove_dir_all(install_dir);
+    }
+
+    #[test]
+    fn update_restore_overwrites_broken_files_and_restores_version() {
+        let install_dir = temp_update_test_dir();
+        std::fs::write(install_dir.join(core_binary_name()), b"old core").unwrap();
+        std::fs::write(install_dir.join(cli_binary_name()), b"old cli").unwrap();
+        std::fs::write(install_dir.join(".version"), b"old version").unwrap();
+        let backup = create_update_backup(&install_dir).unwrap();
+
+        std::fs::write(install_dir.join(core_binary_name()), b"broken core").unwrap();
+        std::fs::write(install_dir.join(cli_binary_name()), b"broken cli").unwrap();
+        std::fs::write(install_dir.join(".version"), b"broken version").unwrap();
+
+        restore_update_backup(&install_dir, &backup).unwrap();
+
+        assert_eq!(
+            std::fs::read(install_dir.join(core_binary_name())).unwrap(),
+            b"old core"
+        );
+        assert_eq!(
+            std::fs::read(install_dir.join(cli_binary_name())).unwrap(),
+            b"old cli"
+        );
+        assert_eq!(
+            std::fs::read(install_dir.join(".version")).unwrap(),
+            b"old version"
+        );
+
+        let _ = cleanup_update_backup(backup);
+        let _ = std::fs::remove_dir_all(install_dir);
+    }
+
+    #[test]
+    fn update_backup_restore_ignores_absent_optional_files() {
+        let install_dir = temp_update_test_dir();
+        std::fs::write(install_dir.join(core_binary_name()), b"old core").unwrap();
+        std::fs::write(install_dir.join(cli_binary_name()), b"old cli").unwrap();
+        let backup = create_update_backup(&install_dir).unwrap();
+
+        restore_update_backup(&install_dir, &backup).unwrap();
+
+        assert_eq!(backup.protected_files.len(), 2);
+        assert!(!install_dir.join(".version").exists());
+        assert!(!install_dir.join(".bootstrap-fingerprint").exists());
+
+        let _ = cleanup_update_backup(backup);
+        let _ = std::fs::remove_dir_all(install_dir);
+    }
+
+    #[test]
+    fn update_backup_cleanup_removes_backup_directory() {
+        let install_dir = temp_update_test_dir();
+        std::fs::write(install_dir.join(core_binary_name()), b"old core").unwrap();
+        let backup = create_update_backup(&install_dir).unwrap();
+        let backup_dir = backup.backup_dir.clone();
+
+        cleanup_update_backup(backup).unwrap();
+
+        assert!(!backup_dir.exists());
+        let _ = std::fs::remove_dir_all(install_dir);
+    }
+
+    #[test]
+    fn update_service_start_classification_accepts_success_and_already_running() {
+        assert!(service_start_succeeded_or_already_running(true, ""));
+        assert!(service_start_succeeded_or_already_running(
+            false,
+            "service already running"
+        ));
+    }
+
+    #[test]
+    fn update_service_start_classification_rejects_other_failures() {
+        assert!(!service_start_succeeded_or_already_running(
+            false,
+            "permission denied"
+        ));
     }
 }
