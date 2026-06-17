@@ -42,6 +42,10 @@ detect_arch() {
 OS=$(detect_os)
 ARCH=$(detect_arch)
 
+if [ "$OS" = "windows" ] && [ "$ARCH" = "aarch64" ]; then
+    ARCH="arm64"
+fi
+
 if [ "$OS" = "unknown" ]; then
     echo "错误：不支持的操作系统: $(uname -s)"
     exit 1
@@ -56,6 +60,17 @@ if [ "$OS" = "freebsd" ]; then
     echo "错误：FreeBSD 暂无预编译二进制文件，请从源码编译安装。"
     exit 1
 fi
+
+case "$OS/$ARCH" in
+    linux/x86_64|linux/aarch64|linux/riscv64|linux/loongarch64|linux/armv7hf|linux/armv7|linux/armhf|linux/arm|linux/mips|linux/mipsel|\
+    macos/x86_64|macos/aarch64|\
+    windows/x86_64|windows/i686|windows/arm64)
+        ;;
+    *)
+        echo "错误：不支持的预编译平台: $OS/$ARCH"
+        exit 1
+        ;;
+esac
 
 # 下载工具检测
 download_cmd() {

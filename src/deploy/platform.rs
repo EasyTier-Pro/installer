@@ -7,27 +7,47 @@ pub(crate) struct Platform {
 
 pub(crate) fn detect_platform() -> anyhow::Result<Platform> {
     let os = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
+    let arch = option_env!("EASYTIER_INSTALLER_ARCH").unwrap_or(std::env::consts::ARCH);
 
-    let et_os = match os {
-        "linux" => "linux",
-        "windows" => "windows",
-        "macos" => "darwin",
-        "freebsd" => "freebsd",
+    map_platform(os, arch)
+}
+
+fn map_platform(os: &str, arch: &str) -> anyhow::Result<Platform> {
+    let (et_os, et_arch) = match os {
+        "linux" => (
+            "linux",
+            match arch {
+                "x86_64" => "x86_64",
+                "aarch64" => "aarch64",
+                "riscv64" => "riscv64",
+                "loongarch64" => "loongarch64",
+                "armv7hf" => "armv7hf",
+                "armv7" => "armv7",
+                "armhf" => "armhf",
+                "arm" => "arm",
+                "mips" => "mips",
+                "mipsel" => "mipsel",
+                _ => anyhow::bail!("不支持的架构: {}", arch),
+            },
+        ),
+        "macos" => (
+            "darwin",
+            match arch {
+                "x86_64" => "x86_64",
+                "aarch64" => "aarch64",
+                _ => anyhow::bail!("不支持的架构: {}", arch),
+            },
+        ),
+        "windows" => (
+            "windows",
+            match arch {
+                "x86_64" => "x86_64",
+                "x86" | "i686" => "i686",
+                "aarch64" | "arm64" => "arm64",
+                _ => anyhow::bail!("不支持的架构: {}", arch),
+            },
+        ),
         _ => anyhow::bail!("不支持的操作系统: {}", os),
-    };
-
-    let et_arch = match arch {
-        "x86_64" => "x86_64",
-        "aarch64" => {
-            if os == "windows" {
-                "arm64"
-            } else {
-                "aarch64"
-            }
-        }
-        "arm" => "arm",
-        _ => anyhow::bail!("不支持的架构: {}", arch),
     };
 
     Ok(Platform {
@@ -321,6 +341,49 @@ pub(crate) fn build_config_server_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_supported_platforms() {
+        let cases = [
+            ("linux", "x86_64", "linux", "x86_64"),
+            ("linux", "aarch64", "linux", "aarch64"),
+            ("linux", "riscv64", "linux", "riscv64"),
+            ("linux", "loongarch64", "linux", "loongarch64"),
+            ("linux", "armv7hf", "linux", "armv7hf"),
+            ("linux", "armv7", "linux", "armv7"),
+            ("linux", "armhf", "linux", "armhf"),
+            ("linux", "arm", "linux", "arm"),
+            ("linux", "mips", "linux", "mips"),
+            ("linux", "mipsel", "linux", "mipsel"),
+            ("macos", "x86_64", "darwin", "x86_64"),
+            ("macos", "aarch64", "darwin", "aarch64"),
+            ("windows", "x86_64", "windows", "x86_64"),
+            ("windows", "x86", "windows", "i686"),
+            ("windows", "i686", "windows", "i686"),
+            ("windows", "aarch64", "windows", "arm64"),
+            ("windows", "arm64", "windows", "arm64"),
+        ];
+
+        for (os, arch, expected_os, expected_arch) in cases {
+            let platform = map_platform(os, arch).expect("platform should be supported");
+
+            assert_eq!(platform.os, expected_os);
+            assert_eq!(platform.arch, expected_arch);
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_platforms() {
+        let cases = [
+            ("freebsd", "x86_64"),
+            ("linux", "sparc64"),
+            ("solaris", "x86_64"),
+        ];
+
+        for (os, arch) in cases {
+            assert!(map_platform(os, arch).is_err());
+        }
+    }
 
     #[test]
     fn uses_console_config_server_url_before_fallback() {

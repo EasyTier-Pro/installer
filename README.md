@@ -190,7 +190,6 @@ cargo build --release
 
 ## 支持平台
 
-- Linux (x86_64, aarch64, arm)
-- Windows (x86_64, arm64)
+- Linux (x86_64, aarch64, riscv64, loongarch64, armv7hf, armv7, armhf, arm, mips, mipsel)
+- Windows (x86_64, i686, arm64)
 - macOS (x86_64, aarch64)
-- FreeBSD (x86_64)
