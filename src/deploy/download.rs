@@ -2,11 +2,14 @@ use crate::deploy::platform::{Platform, default_cache_dir};
 use anyhow::Context;
 use colored::Colorize;
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 const GITHUB_RELEASE_API: &str = "https://api.github.com/repos/EasyTier/EasyTier/releases/tags";
 const USER_AGENT: &str = "easytier-pro-installer";
+// EasyTier release ZIPs are far smaller today; keep this generous and local so
+// it can be adjusted if release packaging changes.
+const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DownloadProgress {
@@ -203,15 +206,11 @@ where
             .await
             .with_context(|| format!("无法获取 {} 的 SHA-256 校验信息", asset_name))?;
 
-    let zip_data = if let Some(zip_data) =
-        read_verified_cache(&archive_path, &expected_sha256, &asset_name, quiet)?
-    {
-        let size = zip_data.len() as u64;
+    if let Some(size) = read_verified_cache(&archive_path, &expected_sha256, &asset_name, quiet)? {
         on_progress(DownloadProgress {
             downloaded: size,
             total: Some(size),
         })?;
-        zip_data
     } else {
         let resp = tokio::time::timeout(
             std::time::Duration::from_secs(connect_timeout_secs),
@@ -228,11 +227,12 @@ where
             );
         }
 
-        let total_size = resp.content_length().unwrap_or(0);
+        let total_size = resp.content_length();
+        ensure_content_length_within_limit(total_size, &asset_name)?;
         let pb = if quiet {
             None
         } else {
-            let pb = indicatif::ProgressBar::new(total_size);
+            let pb = indicatif::ProgressBar::new(total_size.unwrap_or(0));
             pb.set_style(
                 indicatif::ProgressStyle::default_bar()
                     .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
@@ -241,41 +241,54 @@ where
             Some(pb)
         };
 
-        let mut zip_data = Vec::new();
-        let mut stream = resp.bytes_stream();
-        use tokio_stream::StreamExt;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            zip_data.extend_from_slice(&chunk);
-            if let Some(pb) = &pb {
-                pb.inc(chunk.len() as u64);
+        let temp_path = temp_archive_path(&cache_dir, &asset_name);
+        let download_result = async {
+            let mut temp_file = std::fs::File::create(&temp_path)
+                .with_context(|| format!("无法创建临时下载文件 {}", temp_path.display()))?;
+            let mut downloaded = 0u64;
+            let mut stream = resp.bytes_stream();
+            use tokio_stream::StreamExt;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                downloaded = add_downloaded_bytes(downloaded, chunk.len(), &asset_name)?;
+                temp_file.write_all(&chunk)?;
+                if let Some(pb) = &pb {
+                    pb.inc(chunk.len() as u64);
+                }
+                on_progress(DownloadProgress {
+                    downloaded,
+                    total: total_size,
+                })?;
             }
-            on_progress(DownloadProgress {
-                downloaded: zip_data.len() as u64,
-                total: (total_size > 0).then_some(total_size),
-            })?;
+            temp_file.sync_all()?;
+            Ok::<(), anyhow::Error>(())
         }
+        .await;
         if let Some(pb) = &pb {
             pb.finish_and_clear();
         }
+        if let Err(err) = download_result {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(err);
+        }
 
-        verify_sha256(&zip_data, &expected_sha256, &asset_name)?;
-        std::fs::write(&archive_path, &zip_data)?;
+        finalize_verified_download(&temp_path, &archive_path, &expected_sha256, &asset_name)?;
         if !quiet {
             crate::style::info(&format!(
                 "已缓存压缩包到 {}",
                 archive_path.to_string_lossy().bright_white()
             ));
         }
-        zip_data
-    };
+    }
 
     let staging_dir = install_dir.join(".extract-tmp");
     if staging_dir.exists() {
         std::fs::remove_dir_all(&staging_dir)?;
     }
     std::fs::create_dir_all(&staging_dir)?;
-    extract_zip(&zip_data, &staging_dir)?;
+    let archive_file = std::fs::File::open(&archive_path)
+        .with_context(|| format!("无法打开归档文件 {}", archive_path.display()))?;
+    extract_zip(archive_file, &staging_dir)?;
 
     let package_root = find_package_root(&staging_dir, core_name, cli_name)?
         .ok_or_else(|| anyhow::anyhow!("解压后未找到 easytier-core 和 easytier-cli"))?;
@@ -326,13 +339,22 @@ fn read_verified_cache(
     expected_sha256: &str,
     asset_name: &str,
     quiet: bool,
-) -> anyhow::Result<Option<Vec<u8>>> {
+) -> anyhow::Result<Option<u64>> {
     if !archive_path.exists() {
         return Ok(None);
     }
 
-    let zip_data = std::fs::read(archive_path)?;
-    match verify_sha256(&zip_data, expected_sha256, asset_name) {
+    let size = std::fs::metadata(archive_path)?.len();
+    if let Err(err) = ensure_archive_size(size, asset_name) {
+        if !quiet {
+            crate::style::warning(&format!("缓存压缩包大小无效，重新下载: {}", err));
+        }
+        std::fs::remove_file(archive_path)
+            .with_context(|| format!("无法删除大小无效的缓存文件 {}", archive_path.display()))?;
+        return Ok(None);
+    }
+
+    match verify_sha256_file(archive_path, expected_sha256, asset_name) {
         Ok(()) => {
             if !quiet {
                 crate::style::info(&format!(
@@ -340,7 +362,7 @@ fn read_verified_cache(
                     archive_path.to_string_lossy().bright_white()
                 ));
             }
-            Ok(Some(zip_data))
+            Ok(Some(size))
         }
         Err(err) => {
             if !quiet {
@@ -381,6 +403,7 @@ fn parse_github_release_sha256(metadata: &str, asset_name: &str) -> anyhow::Resu
     anyhow::bail!("release metadata 中未找到 {}", asset_name)
 }
 
+#[cfg(test)]
 fn verify_sha256(data: &[u8], expected_sha256: &str, asset_name: &str) -> anyhow::Result<()> {
     validate_sha256_hex(expected_sha256)?;
     let actual = sha256_hex(data);
@@ -395,6 +418,7 @@ fn verify_sha256(data: &[u8], expected_sha256: &str, asset_name: &str) -> anyhow
     Ok(())
 }
 
+#[cfg(test)]
 fn sha256_hex(data: &[u8]) -> String {
     let digest = Sha256::digest(data);
     digest.iter().map(|byte| format!("{:02x}", byte)).collect()
@@ -407,8 +431,107 @@ fn validate_sha256_hex(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn extract_zip(data: &[u8], dest: &Path) -> anyhow::Result<()> {
-    let reader = std::io::Cursor::new(data);
+fn ensure_archive_size(size: u64, asset_name: &str) -> anyhow::Result<()> {
+    if size > MAX_ARCHIVE_BYTES {
+        anyhow::bail!(
+            "{} 超过最大归档大小限制: {} > {} bytes",
+            asset_name,
+            size,
+            MAX_ARCHIVE_BYTES
+        );
+    }
+    Ok(())
+}
+
+fn ensure_content_length_within_limit(
+    content_length: Option<u64>,
+    asset_name: &str,
+) -> anyhow::Result<()> {
+    if let Some(size) = content_length {
+        ensure_archive_size(size, asset_name)?;
+    }
+    Ok(())
+}
+
+fn add_downloaded_bytes(
+    downloaded: u64,
+    chunk_len: usize,
+    asset_name: &str,
+) -> anyhow::Result<u64> {
+    let next = downloaded
+        .checked_add(chunk_len as u64)
+        .ok_or_else(|| anyhow::anyhow!("{} 下载大小溢出", asset_name))?;
+    ensure_archive_size(next, asset_name)?;
+    Ok(next)
+}
+
+fn temp_archive_path(cache_dir: &Path, asset_name: &str) -> PathBuf {
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    cache_dir.join(format!(".{asset_name}.{unique}.tmp"))
+}
+
+fn finalize_verified_download(
+    temp_path: &Path,
+    archive_path: &Path,
+    expected_sha256: &str,
+    asset_name: &str,
+) -> anyhow::Result<()> {
+    let result = (|| {
+        verify_sha256_file(temp_path, expected_sha256, asset_name)?;
+        std::fs::rename(temp_path, archive_path).with_context(|| {
+            format!(
+                "无法将临时下载文件 {} 移动到 {}",
+                temp_path.display(),
+                archive_path.display()
+            )
+        })?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp_path);
+    }
+    result
+}
+
+fn verify_sha256_file(path: &Path, expected_sha256: &str, asset_name: &str) -> anyhow::Result<()> {
+    validate_sha256_hex(expected_sha256)?;
+    let actual = sha256_file_hex(path)?;
+    if actual != expected_sha256.to_ascii_lowercase() {
+        anyhow::bail!(
+            "{} SHA-256 mismatch: expected {}, got {}",
+            asset_name,
+            expected_sha256,
+            actual
+        );
+    }
+    Ok(())
+}
+
+fn sha256_file_hex(path: &Path) -> anyhow::Result<String> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("无法打开归档文件 {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize();
+    Ok(digest.iter().map(|byte| format!("{:02x}", byte)).collect())
+}
+
+fn extract_zip<R: Read + Seek>(reader: R, dest: &Path) -> anyhow::Result<()> {
     let mut archive = zip::ZipArchive::new(reader)?;
 
     for i in 0..archive.len() {
@@ -533,8 +656,10 @@ mod tests {
         let core_name = crate::deploy::core_binary_name();
         let cli_name = crate::deploy::cli_binary_name();
         let archive = test_zip(&[(core_name, b"core".as_ref()), (cli_name, b"cli".as_ref())]);
+        let archive_path = extract_dir.parent().unwrap().join("archive.zip");
+        std::fs::write(&archive_path, archive).unwrap();
 
-        extract_zip(&archive, &extract_dir).unwrap();
+        extract_zip(std::fs::File::open(&archive_path).unwrap(), &extract_dir).unwrap();
         let package_root = find_package_root(&extract_dir, core_name, cli_name).unwrap();
 
         assert_eq!(package_root, Some(extract_dir.clone()));
@@ -558,8 +683,10 @@ mod tests {
         let core_path = format!("package/{core_name}");
         let cli_path = format!("package/{cli_name}");
         let archive = test_zip(&[(&core_path, b"core".as_ref()), (&cli_path, b"cli".as_ref())]);
+        let archive_path = extract_dir.parent().unwrap().join("archive.zip");
+        std::fs::write(&archive_path, archive).unwrap();
 
-        extract_zip(&archive, &extract_dir).unwrap();
+        extract_zip(std::fs::File::open(&archive_path).unwrap(), &extract_dir).unwrap();
         let package_root = find_package_root(&extract_dir, core_name, cli_name).unwrap();
 
         assert_eq!(package_root, Some(extract_dir.join("package")));
@@ -571,7 +698,7 @@ mod tests {
         let extract_dir = temp_test_path("extract-invalid");
         std::fs::create_dir_all(&extract_dir).unwrap();
 
-        let err = extract_zip(b"not a zip", &extract_dir).unwrap_err();
+        let err = extract_zip(std::io::Cursor::new(b"not a zip"), &extract_dir).unwrap_err();
 
         assert!(!err.to_string().is_empty());
         let _ = std::fs::remove_dir_all(extract_dir.parent().unwrap());
@@ -653,6 +780,55 @@ mod tests {
         let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
         verify_sha256(b"abc", expected, "archive.zip").unwrap();
+    }
+
+    #[test]
+    fn rejects_content_length_over_archive_limit() {
+        let err = ensure_content_length_within_limit(Some(MAX_ARCHIVE_BYTES + 1), "archive.zip")
+            .unwrap_err();
+
+        assert!(err.to_string().contains("最大归档大小限制"));
+    }
+
+    #[test]
+    fn rejects_streamed_bytes_over_archive_limit() {
+        let err = add_downloaded_bytes(MAX_ARCHIVE_BYTES, 1, "archive.zip").unwrap_err();
+
+        assert!(err.to_string().contains("最大归档大小限制"));
+    }
+
+    #[test]
+    fn finalizes_verified_download_by_renaming_temp_file() {
+        let root = temp_test_path("finalize-download");
+        std::fs::create_dir_all(&root).unwrap();
+        let temp_path = root.join("archive.tmp");
+        let archive_path = root.join("archive.zip");
+        std::fs::write(&temp_path, b"abc").unwrap();
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+        finalize_verified_download(&temp_path, &archive_path, expected, "archive.zip").unwrap();
+
+        assert!(!temp_path.exists());
+        assert_eq!(std::fs::read(&archive_path).unwrap(), b"abc");
+        std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn removes_temp_file_when_finalized_download_fails_verification() {
+        let root = temp_test_path("finalize-download-failure");
+        std::fs::create_dir_all(&root).unwrap();
+        let temp_path = root.join("archive.tmp");
+        let archive_path = root.join("archive.zip");
+        std::fs::write(&temp_path, b"corrupted").unwrap();
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+        let err = finalize_verified_download(&temp_path, &archive_path, expected, "archive.zip")
+            .unwrap_err();
+
+        assert!(err.to_string().contains("SHA-256 mismatch"));
+        assert!(!temp_path.exists());
+        assert!(!archive_path.exists());
+        std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
     #[test]
