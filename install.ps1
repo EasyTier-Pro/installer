@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 3.0
 
 param(
     [string]$InstallDir = "$env:LOCALAPPDATA\easytier-pro-installer",
@@ -13,6 +13,39 @@ $GiteeRepo = "easytier/easytier-pro-installer"
 $ReleaseApiBase = "https://gitee.com/api/v5/repos"
 $ReleaseDownloadBase = "https://gitee.com"
 $Repo = $GiteeRepo
+
+function Invoke-InstallerRestMethod {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri
+    )
+
+    $Params = @{ Uri = $Uri }
+    if ((Get-Command Invoke-RestMethod).Parameters.ContainsKey("UseBasicParsing")) {
+        $Params.UseBasicParsing = $true
+    }
+
+    Invoke-RestMethod @Params
+}
+
+function Invoke-InstallerWebRequest {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+        [Parameter(Mandatory = $true)]
+        [string]$OutFile
+    )
+
+    $Params = @{
+        Uri = $Uri
+        OutFile = $OutFile
+    }
+    if ((Get-Command Invoke-WebRequest).Parameters.ContainsKey("UseBasicParsing")) {
+        $Params.UseBasicParsing = $true
+    }
+
+    Invoke-WebRequest @Params
+}
 
 # 检测架构
 switch ($env:PROCESSOR_ARCHITECTURE) {
@@ -30,7 +63,7 @@ $OS = "windows"
 # 获取最新版本
 Write-Host "正在查询最新版本..."
 try {
-    $Release = Invoke-RestMethod -Uri "$ReleaseApiBase/$Repo/releases/latest" -UseBasicParsing
+    $Release = Invoke-InstallerRestMethod -Uri "$ReleaseApiBase/$Repo/releases/latest"
     $Version = $Release.tag_name
 } catch {
     Write-Host "gitee 获取失败，尝试 github..."
@@ -38,7 +71,7 @@ try {
     $ReleaseDownloadBase = "https://github.com"
     $Repo = $GithubRepo
     try {
-        $Release = Invoke-RestMethod -Uri "$ReleaseApiBase/$Repo/releases/latest" -UseBasicParsing
+        $Release = Invoke-InstallerRestMethod -Uri "$ReleaseApiBase/$Repo/releases/latest"
         $Version = $Release.tag_name
     } catch {
         Write-Error "错误：无法获取最新版本信息: $_"
@@ -76,7 +109,7 @@ Write-Host "  来源: $Url"
 
 try {
     $ProgressPreference = 'Continue'
-    Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
+    Invoke-InstallerWebRequest -Uri $Url -OutFile $Dest
 } catch {
     Write-Error "错误：下载失败: $_"
     exit 1
