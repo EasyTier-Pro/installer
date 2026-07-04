@@ -98,6 +98,25 @@ where
 {
     let sources = [("gitee", 10u64), ("github_proxy", 10u64), ("github", 10u64)];
     let version = normalize_version(version);
+    let core_name = super::core_binary_name();
+    let cli_name = super::cli_binary_name();
+
+    if let Some(result) = existing_install_result(install_dir, core_name, cli_name, &version, quiet)
+    {
+        return Ok(result);
+    }
+
+    if let Some(result) = try_install_bundled_archive(
+        platform,
+        install_dir,
+        &version,
+        core_name,
+        cli_name,
+        on_progress,
+        quiet,
+    )? {
+        return Ok(result);
+    }
 
     for (source, connect_timeout_secs) in &sources {
         let url = build_download_url(platform, &version, source);
@@ -135,10 +154,31 @@ async fn download_easytier_with_timeout(
     connect_timeout_secs: u64,
 ) -> anyhow::Result<(PathBuf, PathBuf, String)> {
     let mut ignore_progress = |_progress: DownloadProgress| Ok(());
+    let version = normalize_version(version);
+    let core_name = super::core_binary_name();
+    let cli_name = super::cli_binary_name();
+
+    if let Some(result) = existing_install_result(install_dir, core_name, cli_name, &version, false)
+    {
+        return Ok(result);
+    }
+
+    if let Some(result) = try_install_bundled_archive(
+        platform,
+        install_dir,
+        &version,
+        core_name,
+        cli_name,
+        &mut ignore_progress,
+        false,
+    )? {
+        return Ok(result);
+    }
+
     download_easytier_with_timeout_impl(
         platform,
         install_dir,
-        version,
+        &version,
         download_url,
         connect_timeout_secs,
         &mut ignore_progress,
@@ -163,32 +203,23 @@ where
 
     let core_name = super::core_binary_name();
     let cli_name = super::cli_binary_name();
-    let core_path = install_dir.join(core_name);
-    let cli_path = install_dir.join(cli_name);
-    let version_file = install_dir.join(".version");
 
-    if core_path.exists() && cli_path.exists() {
-        let cached = std::fs::read_to_string(&version_file)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if cached == version {
-            if !quiet {
-                crate::style::info(&format!("本地已有 {}，跳过下载", version.bright_white()));
-            }
-            return Ok((core_path, cli_path, version));
-        }
+    if let Some(result) = existing_install_result(install_dir, core_name, cli_name, &version, quiet)
+    {
+        return Ok(result);
     }
 
+    let core_path = install_dir.join(core_name);
+    let cli_path = install_dir.join(cli_name);
     let asset_name = asset_name(platform, &version);
     let cache_dir = default_cache_dir();
     let archive_path = cache_dir.join(&asset_name);
 
+    std::fs::create_dir_all(&cache_dir)?;
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs))
         .build()?;
 
-    std::fs::create_dir_all(&cache_dir)?;
     let zip_data = if archive_path.exists() {
         if !quiet {
             crate::style::info(&format!(
@@ -260,27 +291,181 @@ where
         zip_data
     };
 
+    let (staging_dir, package_root) = stage_archive(&zip_data, install_dir, core_name, cli_name)?;
+    install_staged_archive(
+        &staging_dir,
+        &package_root,
+        install_dir,
+        &core_path,
+        &cli_path,
+        &version,
+    )?;
+    Ok((core_path, cli_path, version))
+}
+
+fn existing_install_result(
+    install_dir: &Path,
+    core_name: &str,
+    cli_name: &str,
+    version: &str,
+    quiet: bool,
+) -> Option<(PathBuf, PathBuf, String)> {
+    let core_path = install_dir.join(core_name);
+    let cli_path = install_dir.join(cli_name);
+    let version_file = install_dir.join(".version");
+
+    if !core_path.exists() || !cli_path.exists() {
+        return None;
+    }
+
+    let cached = std::fs::read_to_string(&version_file)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if cached != version {
+        return None;
+    }
+
+    if !quiet {
+        crate::style::info(&format!("本地已有 {}，跳过下载", version.bright_white()));
+    }
+    Some((core_path, cli_path, version.to_string()))
+}
+
+fn try_install_bundled_archive<F>(
+    platform: &Platform,
+    install_dir: &Path,
+    version: &str,
+    core_name: &str,
+    cli_name: &str,
+    on_progress: &mut F,
+    quiet: bool,
+) -> anyhow::Result<Option<(PathBuf, PathBuf, String)>>
+where
+    F: FnMut(DownloadProgress) -> anyhow::Result<()>,
+{
+    let asset_name = asset_name(platform, version);
+    let Some(zip_data) = read_bundled_archive(&asset_name, quiet)? else {
+        return Ok(None);
+    };
+
+    let (staging_dir, package_root) =
+        match stage_archive(&zip_data, install_dir, core_name, cli_name) {
+            Ok(staged) => staged,
+            Err(err) => {
+                if !quiet {
+                    crate::style::warning(&format!(
+                        "内置压缩包不可用，继续尝试缓存或下载: {}",
+                        err
+                    ));
+                }
+                return Ok(None);
+            }
+        };
+
+    let size = zip_data.len() as u64;
+    if let Err(err) = on_progress(DownloadProgress {
+        downloaded: size,
+        total: Some(size),
+    }) {
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        return Err(err);
+    }
+
+    let core_path = install_dir.join(core_name);
+    let cli_path = install_dir.join(cli_name);
+    install_staged_archive(
+        &staging_dir,
+        &package_root,
+        install_dir,
+        &core_path,
+        &cli_path,
+        version,
+    )?;
+
+    Ok(Some((core_path, cli_path, version.to_string())))
+}
+
+fn read_bundled_archive(asset_name: &str, quiet: bool) -> anyhow::Result<Option<Vec<u8>>> {
+    let Some(bundled_archive_path) = bundled_archive_path(asset_name) else {
+        return Ok(None);
+    };
+
+    if !quiet {
+        crate::style::info(&format!(
+            "使用内置压缩包 {}",
+            bundled_archive_path.to_string_lossy().bright_white()
+        ));
+    }
+
+    match std::fs::read(&bundled_archive_path) {
+        Ok(zip_data) => Ok(Some(zip_data)),
+        Err(err) => {
+            if !quiet {
+                crate::style::warning(&format!("内置压缩包读取失败，忽略: {}", err));
+            }
+            Ok(None)
+        }
+    }
+}
+
+fn bundled_archive_path(asset_name: &str) -> Option<PathBuf> {
+    let current_exe = std::env::current_exe().ok()?;
+    let archive_path = archive_path_next_to_exe(&current_exe, asset_name)?;
+    archive_path.exists().then_some(archive_path)
+}
+
+fn archive_path_next_to_exe(exe_path: &Path, asset_name: &str) -> Option<PathBuf> {
+    exe_path.parent().map(|dir| dir.join(asset_name))
+}
+
+fn stage_archive(
+    zip_data: &[u8],
+    install_dir: &Path,
+    core_name: &str,
+    cli_name: &str,
+) -> anyhow::Result<(PathBuf, PathBuf)> {
     let staging_dir = install_dir.join(".extract-tmp");
     if staging_dir.exists() {
         std::fs::remove_dir_all(&staging_dir)?;
     }
     std::fs::create_dir_all(&staging_dir)?;
-    extract_zip(&zip_data, &staging_dir)?;
 
-    let package_root = find_package_root(&staging_dir, core_name, cli_name)?
-        .ok_or_else(|| anyhow::anyhow!("解压后未找到 easytier-core 和 easytier-cli"))?;
-    sync_dir_contents(&package_root, install_dir)?;
-    std::fs::remove_dir_all(&staging_dir)?;
+    let result = (|| {
+        extract_zip(zip_data, &staging_dir)?;
+        find_package_root(&staging_dir, core_name, cli_name)?
+            .ok_or_else(|| anyhow::anyhow!("解压后未找到 easytier-core 和 easytier-cli"))
+    })();
+
+    match result {
+        Ok(package_root) => Ok((staging_dir, package_root)),
+        Err(err) => {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            Err(err)
+        }
+    }
+}
+
+fn install_staged_archive(
+    staging_dir: &Path,
+    package_root: &Path,
+    install_dir: &Path,
+    core_path: &Path,
+    cli_path: &Path,
+    version: &str,
+) -> anyhow::Result<()> {
+    sync_dir_contents(package_root, install_dir)?;
+    std::fs::remove_dir_all(staging_dir)?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&core_path, std::fs::Permissions::from_mode(0o755))?;
-        std::fs::set_permissions(&cli_path, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(core_path, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(cli_path, std::fs::Permissions::from_mode(0o755))?;
     }
 
-    std::fs::write(install_dir.join(".version"), &version)?;
-    Ok((core_path, cli_path, version))
+    std::fs::write(install_dir.join(".version"), version)?;
+    Ok(())
 }
 
 fn extract_zip(data: &[u8], dest: &Path) -> anyhow::Result<()> {
@@ -353,4 +538,52 @@ pub(crate) fn sync_dir_contents(src: &Path, dst: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_test_path(name: &str) -> PathBuf {
+        let unique = format!(
+            "easytier-download-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique).join(name)
+    }
+
+    #[test]
+    fn archive_path_next_to_exe_uses_installer_directory() {
+        let exe_path = Path::new("install-dir")
+            .join("resources")
+            .join("easytier-pro-installer.exe");
+
+        let archive_path =
+            archive_path_next_to_exe(&exe_path, "easytier-windows-x86_64-v2.6.4.zip")
+                .expect("archive path");
+
+        assert_eq!(
+            archive_path,
+            PathBuf::from("install-dir")
+                .join("resources")
+                .join("easytier-windows-x86_64-v2.6.4.zip")
+        );
+    }
+
+    #[test]
+    fn stage_archive_removes_invalid_staging_dir() {
+        let install_dir = temp_test_path("install");
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        let err =
+            stage_archive(b"not a zip", &install_dir, "easytier-core", "easytier-cli").unwrap_err();
+
+        assert!(!err.to_string().is_empty());
+        assert!(!install_dir.join(".extract-tmp").exists());
+        std::fs::remove_dir_all(install_dir.parent().unwrap()).unwrap();
+    }
 }
