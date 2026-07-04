@@ -206,11 +206,32 @@ where
             .await
             .with_context(|| format!("无法获取 {} 的 SHA-256 校验信息", asset_name))?;
 
-    if let Some(size) = read_verified_cache(&archive_path, &expected_sha256, &asset_name, quiet)? {
+    let mut bundled_archive_to_extract = None;
+    if let Some(bundled_archive_path) = bundled_archive_path(&asset_name)
+        && let Some(size) = read_verified_bundled_archive(
+            &bundled_archive_path,
+            &expected_sha256,
+            &asset_name,
+            quiet,
+        )?
+    {
         on_progress(DownloadProgress {
             downloaded: size,
             total: Some(size),
         })?;
+        bundled_archive_to_extract = Some(bundled_archive_path);
+    }
+
+    let archive_to_extract = if let Some(bundled_archive_path) = bundled_archive_to_extract {
+        bundled_archive_path
+    } else if let Some(size) =
+        read_verified_cache(&archive_path, &expected_sha256, &asset_name, quiet)?
+    {
+        on_progress(DownloadProgress {
+            downloaded: size,
+            total: Some(size),
+        })?;
+        archive_path.clone()
     } else {
         let resp = tokio::time::timeout(
             std::time::Duration::from_secs(connect_timeout_secs),
@@ -279,15 +300,16 @@ where
                 archive_path.to_string_lossy().bright_white()
             ));
         }
-    }
+        archive_path.clone()
+    };
 
     let staging_dir = install_dir.join(".extract-tmp");
     if staging_dir.exists() {
         std::fs::remove_dir_all(&staging_dir)?;
     }
     std::fs::create_dir_all(&staging_dir)?;
-    let archive_file = std::fs::File::open(&archive_path)
-        .with_context(|| format!("无法打开归档文件 {}", archive_path.display()))?;
+    let archive_file = std::fs::File::open(&archive_to_extract)
+        .with_context(|| format!("无法打开归档文件 {}", archive_to_extract.display()))?;
     extract_zip(archive_file, &staging_dir)?;
 
     let package_root = find_package_root(&staging_dir, core_name, cli_name)?
@@ -332,6 +354,52 @@ async fn fetch_expected_sha256(
 
     let metadata = resp.text().await?;
     parse_github_release_sha256(&metadata, asset_name)
+}
+
+fn bundled_archive_path(asset_name: &str) -> Option<PathBuf> {
+    let current_exe = std::env::current_exe().ok()?;
+    archive_path_next_to_exe(&current_exe, asset_name)
+}
+
+fn archive_path_next_to_exe(exe_path: &Path, asset_name: &str) -> Option<PathBuf> {
+    exe_path.parent().map(|dir| dir.join(asset_name))
+}
+
+fn read_verified_bundled_archive(
+    archive_path: &Path,
+    expected_sha256: &str,
+    asset_name: &str,
+    quiet: bool,
+) -> anyhow::Result<Option<u64>> {
+    if !archive_path.exists() {
+        return Ok(None);
+    }
+
+    let size = std::fs::metadata(archive_path)?.len();
+    if let Err(err) = ensure_archive_size(size, asset_name) {
+        if !quiet {
+            crate::style::warning(&format!("内置压缩包大小无效，忽略: {}", err));
+        }
+        return Ok(None);
+    }
+
+    match verify_sha256_file(archive_path, expected_sha256, asset_name) {
+        Ok(()) => {
+            if !quiet {
+                crate::style::info(&format!(
+                    "使用已验证内置压缩包 {}",
+                    archive_path.to_string_lossy().bright_white()
+                ));
+            }
+            Ok(Some(size))
+        }
+        Err(err) => {
+            if !quiet {
+                crate::style::warning(&format!("内置压缩包校验失败，忽略: {}", err));
+            }
+            Ok(None)
+        }
+    }
 }
 
 fn read_verified_cache(
@@ -842,6 +910,38 @@ mod tests {
 
         assert!(cached.is_none());
         assert!(!path.exists());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn archive_path_next_to_exe_uses_installer_directory() {
+        let exe_path = Path::new("install-dir")
+            .join("resources")
+            .join("easytier-pro-installer.exe");
+
+        let archive_path =
+            archive_path_next_to_exe(&exe_path, "easytier-windows-x86_64-v2.6.4.zip")
+                .expect("archive path");
+
+        assert_eq!(
+            archive_path,
+            PathBuf::from("install-dir")
+                .join("resources")
+                .join("easytier-windows-x86_64-v2.6.4.zip")
+        );
+    }
+
+    #[test]
+    fn rejects_corrupted_bundled_archive_without_removing_it() {
+        let path = temp_test_path("bundled-archive.zip");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"corrupted").unwrap();
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+        let bundled = read_verified_bundled_archive(&path, expected, "archive.zip", true).unwrap();
+
+        assert!(bundled.is_none());
+        assert!(path.exists());
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }
