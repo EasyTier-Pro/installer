@@ -5,6 +5,16 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      run_install_e2e:
+        description: Run privileged install/uninstall e2e when configured
+        required: false
+        default: false
+        type: boolean
+      easytier_version:
+        description: EasyTier core version for privileged install e2e
+        required: false
+        default: ''
 
 env:
   CARGO_TERM_COLOR: always
@@ -100,9 +110,47 @@ jobs:
           name: easytier-pro-installer-${{ matrix.os }}-${{ matrix.arch }}
           path: easytier-pro-installer-${{ matrix.os }}-${{ matrix.arch }}*
 
+  artifact-smoke:
+    name: Artifact Smoke ${{ matrix.os }}-${{ matrix.arch }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux,   arch: x86_64,     runner: ubuntu-latest,   ext: '' }
+          - { os: linux,   arch: aarch64,    runner: ubuntu-latest,   ext: '' }
+          - { os: linux,   arch: riscv64,    runner: ubuntu-latest,   ext: '' }
+          - { os: linux,   arch: loongarch64,runner: ubuntu-latest,   ext: '' }
+          - { os: linux,   arch: armv7hf,    runner: ubuntu-latest,   ext: '' }
+          - { os: linux,   arch: armv7,      runner: ubuntu-latest,   ext: '' }
+          - { os: linux,   arch: armhf,      runner: ubuntu-latest,   ext: '' }
+          - { os: linux,   arch: arm,        runner: ubuntu-latest,   ext: '' }
+          - { os: linux,   arch: mips,       runner: ubuntu-latest,   ext: '' }
+          - { os: linux,   arch: mipsel,     runner: ubuntu-latest,   ext: '' }
+          - { os: macos,   arch: x86_64,     runner: macos-latest,    ext: '' }
+          - { os: macos,   arch: aarch64,    runner: macos-latest,    ext: '' }
+          - { os: windows, arch: x86_64,     runner: windows-latest,  ext: '.exe' }
+          - { os: windows, arch: i686,       runner: windows-latest,  ext: '.exe' }
+          - { os: windows, arch: arm64,      runner: windows-11-arm,  ext: '.exe' }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: easytier-pro-installer-${{ matrix.os }}-${{ matrix.arch }}
+
+      - name: Check artifact
+        shell: bash
+        run: |
+          file="easytier-pro-installer-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
+          test -f "$file"
+          test -s "$file"
+          if [ "${{ matrix.os }}" != "windows" ]; then
+            chmod +x "$file"
+          fi
+
   release:
     name: Create Release
-    needs: build
+    needs: [build, artifact-smoke]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -118,3 +166,127 @@ jobs:
         with:
           files: artifacts/*
           generate_release_notes: true
+
+  readme-install-smoke:
+    name: README Install Smoke ${{ matrix.name }}
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64,   runner: ubuntu-latest,    os: linux }
+          - { name: linux-aarch64,  runner: ubuntu-24.04-arm, os: linux }
+          - { name: macos-x86_64,   runner: macos-13,         os: macos }
+          - { name: macos-aarch64,  runner: macos-14,         os: macos }
+          - { name: windows-x86_64, runner: windows-latest,   os: windows }
+          - { name: windows-arm64,  runner: windows-11-arm,   os: windows }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run README install script smoke (Linux/macOS)
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          EASYTIER_INSTALLER_SOURCE=github INSTALL_DIR="$RUNNER_TEMP/easytier-pro-installer" bash ./install.sh --help
+
+      - name: Run README install script smoke (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $env:EASYTIER_INSTALLER_SOURCE = 'github'
+          ./install.ps1 -InstallDir "$env:RUNNER_TEMP\easytier-pro-installer" -InstallerArgs '--help'
+
+  live-install-e2e:
+    name: Live Install E2E ${{ matrix.name }}
+    needs: readme-install-smoke
+    if: startsWith(github.ref, 'refs/tags/v') && (vars.RUN_RELEASE_INSTALL_E2E == 'true' || inputs.run_install_e2e)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64,   runner: ubuntu-latest,    os: linux }
+          - { name: linux-aarch64,  runner: ubuntu-24.04-arm, os: linux }
+          - { name: macos-x86_64,   runner: macos-13,         os: macos }
+          - { name: macos-aarch64,  runner: macos-14,         os: macos }
+          - { name: windows-x86_64, runner: windows-latest,   os: windows }
+          - { name: windows-arm64,  runner: windows-11-arm,   os: windows }
+    runs-on: ${{ matrix.runner }}
+    env:
+      E2E_BOOTSTRAP_TOKEN: ${{ secrets.E2E_BOOTSTRAP_TOKEN }}
+      E2E_CONFIG_SERVER: ${{ vars.E2E_CONFIG_SERVER }}
+      E2E_EASYTIER_VERSION: ${{ inputs.easytier_version || vars.E2E_EASYTIER_VERSION }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check e2e configuration
+        id: e2e_config
+        shell: bash
+        run: |
+          if [ -z "$E2E_BOOTSTRAP_TOKEN" ] || [ -z "$E2E_CONFIG_SERVER" ] || [ -z "$E2E_EASYTIER_VERSION" ]; then
+            echo "Privileged install e2e skipped: configure E2E_BOOTSTRAP_TOKEN, E2E_CONFIG_SERVER, and E2E_EASYTIER_VERSION."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::add-mask::$E2E_BOOTSTRAP_TOKEN"
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+      - name: Download installer (Linux/macOS)
+        if: steps.e2e_config.outputs.enabled == 'true' && matrix.os != 'windows'
+        shell: bash
+        run: |
+          EASYTIER_INSTALLER_SOURCE=github INSTALL_DIR="$RUNNER_TEMP/easytier-pro-installer" bash ./install.sh --help
+
+      - name: Install, status, and uninstall service (Linux/macOS)
+        if: steps.e2e_config.outputs.enabled == 'true' && matrix.os != 'windows'
+        shell: bash
+        run: |
+          installer="$RUNNER_TEMP/easytier-pro-installer/easytier-pro-installer"
+          install_dir="$RUNNER_TEMP/easytier-live-e2e"
+          cleanup() {
+            printf '{"install_dir":"%s","purge":true}' "$install_dir" | sudo -E "$installer" desktop uninstall --json || true
+          }
+          trap cleanup EXIT
+          printf '{"bootstrap_token":"%s","install_dir":"%s","config_server":"%s","version":"%s"}' \
+            "$E2E_BOOTSTRAP_TOKEN" "$install_dir" "$E2E_CONFIG_SERVER" "$E2E_EASYTIER_VERSION" \
+            | sudo -E "$installer" desktop install --json
+          printf '{"bootstrap_token":"%s","install_dir":"%s","config_server":"%s","version":"%s"}' \
+            "$E2E_BOOTSTRAP_TOKEN" "$install_dir" "$E2E_CONFIG_SERVER" "$E2E_EASYTIER_VERSION" \
+            | "$installer" desktop status --json
+
+      - name: Download installer (Windows)
+        if: steps.e2e_config.outputs.enabled == 'true' && matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $env:EASYTIER_INSTALLER_SOURCE = 'github'
+          ./install.ps1 -InstallDir "$env:RUNNER_TEMP\easytier-pro-installer" -InstallerArgs '--help'
+
+      - name: Install, status, and uninstall service (Windows)
+        if: steps.e2e_config.outputs.enabled == 'true' && matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'easytier-pro-installer\easytier-pro-installer.exe'
+          $installDir = Join-Path $env:RUNNER_TEMP 'easytier-live-e2e'
+          $installRequest = @{
+            bootstrap_token = $env:E2E_BOOTSTRAP_TOKEN
+            install_dir = $installDir
+            config_server = $env:E2E_CONFIG_SERVER
+            version = $env:E2E_EASYTIER_VERSION
+          } | ConvertTo-Json -Compress
+          $statusRequest = @{
+            bootstrap_token = $env:E2E_BOOTSTRAP_TOKEN
+            install_dir = $installDir
+            config_server = $env:E2E_CONFIG_SERVER
+            version = $env:E2E_EASYTIER_VERSION
+          } | ConvertTo-Json -Compress
+          $uninstallRequest = @{
+            install_dir = $installDir
+            purge = $true
+          } | ConvertTo-Json -Compress
+          try {
+            $installRequest | & $installer desktop install --json
+            $statusRequest | & $installer desktop status --json
+          } finally {
+            $uninstallRequest | & $installer desktop uninstall --json
+          }

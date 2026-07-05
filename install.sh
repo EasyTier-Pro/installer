@@ -9,6 +9,19 @@ RELEASE_API_BASE="https://gitee.com/api/v5/repos"
 RELEASE_DOWNLOAD_BASE="https://gitee.com"
 REPO="$GITEE_REPO"
 
+case "${EASYTIER_INSTALLER_SOURCE:-gitee}" in
+    github)
+        RELEASE_API_BASE="https://api.github.com/repos"
+        RELEASE_DOWNLOAD_BASE="https://github.com"
+        REPO="$GITHUB_REPO"
+        ;;
+    gitee) ;;
+    *)
+        echo "错误：不支持的下载源: $EASYTIER_INSTALLER_SOURCE"
+        exit 1
+        ;;
+esac
+
 # 检测 OS
 detect_os() {
     case "$(uname -s)" in
@@ -69,6 +82,14 @@ download_cmd() {
     fi
 }
 
+download_asset() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fSL --progress-bar "$1" -o "$2"
+    else
+        wget -q --show-progress "$1" -O "$2"
+    fi
+}
+
 # 获取最新版本
 echo "正在查询最新版本..."
 LATEST=$(download_cmd "$RELEASE_API_BASE/$REPO/releases/latest" /dev/stdout | grep -o '"tag_name":"[^"]*"' | head -n 1 | cut -d'"' -f4)
@@ -116,10 +137,29 @@ echo "正在下载 $ASSET ($LATEST)..."
 echo "  来源: $URL"
 
 TMP_DEST="$DEST.tmp.$$"
-if command -v curl >/dev/null 2>&1; then
-    curl -fSL --progress-bar "$URL" -o "$TMP_DEST"
-else
-    wget -q --show-progress "$URL" -O "$TMP_DEST"
+if ! download_asset "$URL" "$TMP_DEST"; then
+    rm -f "$TMP_DEST"
+    if [ "$REPO" = "$GITEE_REPO" ]; then
+        echo "gitee 下载失败，尝试 github..."
+        RELEASE_API_BASE="https://api.github.com/repos"
+        RELEASE_DOWNLOAD_BASE="https://github.com"
+        REPO="$GITHUB_REPO"
+        LATEST=$(download_cmd "$RELEASE_API_BASE/$REPO/releases/latest" /dev/stdout | grep -o '"tag_name":"[^"]*"' | head -n 1 | cut -d'"' -f4)
+        if [ -z "$LATEST" ]; then
+            echo "错误：无法获取 github 最新版本信息"
+            exit 1
+        fi
+        URL="$RELEASE_DOWNLOAD_BASE/$REPO/releases/download/$LATEST/$ASSET"
+        echo "  来源: $URL"
+        download_asset "$URL" "$TMP_DEST" || {
+            rm -f "$TMP_DEST"
+            echo "错误：下载失败"
+            exit 1
+        }
+    else
+        echo "错误：下载失败"
+        exit 1
+    fi
 fi
 
 mv "$TMP_DEST" "$DEST"
