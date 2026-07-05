@@ -13,6 +13,20 @@ $GiteeRepo = "easytier/easytier-pro-installer"
 $ReleaseApiBase = "https://gitee.com/api/v5/repos"
 $ReleaseDownloadBase = "https://gitee.com"
 $Repo = $GiteeRepo
+$InstallerSource = if ($env:EASYTIER_INSTALLER_SOURCE) { $env:EASYTIER_INSTALLER_SOURCE } else { "gitee" }
+
+switch ($InstallerSource) {
+    "github" {
+        $ReleaseApiBase = "https://api.github.com/repos"
+        $ReleaseDownloadBase = "https://github.com"
+        $Repo = $GithubRepo
+    }
+    "gitee" {}
+    default {
+        Write-Error "错误：不支持的下载源: $InstallerSource"
+        exit 1
+    }
+}
 
 function Invoke-InstallerRestMethod {
     param(
@@ -111,8 +125,27 @@ try {
     $ProgressPreference = 'Continue'
     Invoke-InstallerWebRequest -Uri $Url -OutFile $Dest
 } catch {
-    Write-Error "错误：下载失败: $_"
-    exit 1
+    Remove-Item -Force $Dest -ErrorAction SilentlyContinue
+    if ($Repo -eq $GiteeRepo) {
+        Write-Host "gitee 下载失败，尝试 github..."
+        $ReleaseApiBase = "https://api.github.com/repos"
+        $ReleaseDownloadBase = "https://github.com"
+        $Repo = $GithubRepo
+        try {
+            $Release = Invoke-InstallerRestMethod -Uri "$ReleaseApiBase/$Repo/releases/latest"
+            $Version = $Release.tag_name
+            $Url = "$ReleaseDownloadBase/$Repo/releases/download/$Version/$Asset"
+            Write-Host "  来源: $Url"
+            Invoke-InstallerWebRequest -Uri $Url -OutFile $Dest
+        } catch {
+            Remove-Item -Force $Dest -ErrorAction SilentlyContinue
+            Write-Error "错误：下载失败: $_"
+            exit 1
+        }
+    } else {
+        Write-Error "错误：下载失败: $_"
+        exit 1
+    }
 }
 
 $Version | Out-File $VersionFile -Encoding utf8
