@@ -117,7 +117,8 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
     "x86"   { $Arch = "i686" }
     default {
         Write-Error "错误：不支持的架构: $($env:PROCESSOR_ARCHITECTURE)"
-        exit 1
+        $global:LASTEXITCODE = 1
+        return
     }
 }
 
@@ -138,7 +139,8 @@ try {
         $Version = $Release.tag_name
     } catch {
         Write-Error "错误：无法获取最新版本信息: $_"
-        exit 1
+        $global:LASTEXITCODE = 1
+        return
     }
 }
 
@@ -161,7 +163,7 @@ if ((Test-Path $Dest) -and (Test-Path $VersionFile)) {
     if ($LocalVersion.Trim() -eq $Version) {
         Write-Host "本地已是最新版本 $Version，跳过下载"
         Start-Installer -Path $Dest -InstallerArguments $InstallerArgs
-        exit 0
+        return
     }
 }
 
@@ -175,7 +177,8 @@ try {
     Invoke-InstallerWebRequest -Uri $Url -OutFile $Dest
 } catch {
     Write-Error "错误：下载失败: $_"
-    exit 1
+    $global:LASTEXITCODE = 1
+    return
 }
 
 $Version | Out-File $VersionFile -Encoding utf8
