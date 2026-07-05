@@ -47,6 +47,69 @@ function Invoke-InstallerWebRequest {
     Invoke-WebRequest @Params
 }
 
+function Enable-InstallerVirtualTerminal {
+    try {
+        if (-not ("EasyTierInstallerConsoleMode" -as [type])) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class EasyTierInstallerConsoleMode
+{
+    private const int STD_OUTPUT_HANDLE = -11;
+    private const int STD_ERROR_HANDLE = -12;
+    private const uint ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int nStdHandle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+    public static void Enable()
+    {
+        EnableOn(STD_OUTPUT_HANDLE);
+        EnableOn(STD_ERROR_HANDLE);
+    }
+
+    private static void EnableOn(int stdHandle)
+    {
+        IntPtr handle = GetStdHandle(stdHandle);
+        if (handle == IntPtr.Zero || handle == new IntPtr(-1)) {
+            return;
+        }
+
+        uint mode;
+        if (!GetConsoleMode(handle, out mode)) {
+            return;
+        }
+
+        SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    }
+}
+"@
+        }
+
+        [EasyTierInstallerConsoleMode]::Enable()
+    } catch {
+        # Best-effort only. The installer still works without ANSI colors.
+    }
+}
+
+function Start-Installer {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [string[]]$InstallerArguments
+    )
+
+    Enable-InstallerVirtualTerminal
+    & $Path @InstallerArguments
+}
+
 # 检测架构
 switch ($env:PROCESSOR_ARCHITECTURE) {
     "AMD64" { $Arch = "x86_64" }
@@ -97,7 +160,7 @@ if ((Test-Path $Dest) -and (Test-Path $VersionFile)) {
     $LocalVersion = Get-Content $VersionFile -Raw
     if ($LocalVersion.Trim() -eq $Version) {
         Write-Host "本地已是最新版本 $Version，跳过下载"
-        & $Dest @InstallerArgs
+        Start-Installer -Path $Dest -InstallerArguments $InstallerArgs
         exit 0
     }
 }
@@ -123,4 +186,4 @@ Write-Host "正在启动 installer..."
 Write-Host ""
 
 # 运行 installer
-& $Dest @InstallerArgs
+Start-Installer -Path $Dest -InstallerArguments $InstallerArgs
