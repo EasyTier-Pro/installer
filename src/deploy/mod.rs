@@ -881,6 +881,7 @@ async fn install_desktop_service(
 
     #[cfg(not(windows))]
     {
+        let _ = install_dir;
         service::install_service_quiet(cli_path, core_path, full_config_url, Some(machine_id)).await
     }
 }
