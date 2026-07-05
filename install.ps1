@@ -47,53 +47,110 @@ function Invoke-InstallerWebRequest {
     Invoke-WebRequest @Params
 }
 
-function Enable-InstallerVirtualTerminal {
-    try {
-        if (-not ("EasyTierInstallerConsoleMode" -as [type])) {
-            Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-
-public static class EasyTierInstallerConsoleMode
-{
-    private const int STD_OUTPUT_HANDLE = -11;
-    private const int STD_ERROR_HANDLE = -12;
-    private const uint ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr GetStdHandle(int nStdHandle);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
-
-    public static void Enable()
-    {
-        EnableOn(STD_OUTPUT_HANDLE);
-        EnableOn(STD_ERROR_HANDLE);
+function Get-InstallerNativeMethodsType {
+    $Type = "EasyTierInstaller.NativeMethods" -as [type]
+    if ($Type) {
+        return $Type
     }
 
-    private static void EnableOn(int stdHandle)
-    {
-        IntPtr handle = GetStdHandle(stdHandle);
-        if (handle == IntPtr.Zero || handle == new IntPtr(-1)) {
-            return;
-        }
+    $AssemblyName = New-Object System.Reflection.AssemblyName "EasyTierInstaller.Native"
+    try {
+        $AssemblyBuilder = [System.Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly(
+            $AssemblyName,
+            [System.Reflection.Emit.AssemblyBuilderAccess]::Run
+        )
+    } catch {
+        $AssemblyBuilder = [AppDomain]::CurrentDomain.DefineDynamicAssembly(
+            $AssemblyName,
+            [System.Reflection.Emit.AssemblyBuilderAccess]::Run
+        )
+    }
 
-        uint mode;
-        if (!GetConsoleMode(handle, out mode)) {
-            return;
-        }
+    $ModuleBuilder = $AssemblyBuilder.DefineDynamicModule("EasyTierInstaller.Native")
+    $TypeBuilder = $ModuleBuilder.DefineType(
+        "EasyTierInstaller.NativeMethods",
+        [System.Reflection.TypeAttributes]"Public,Sealed,Abstract"
+    )
 
-        SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    $MethodAttributes = [System.Reflection.MethodAttributes]"Public,Static,PinvokeImpl"
+    $CallingConvention = [System.Runtime.InteropServices.CallingConvention]::Winapi
+    $CharSet = [System.Runtime.InteropServices.CharSet]::Auto
+    $StandardCall = [System.Reflection.CallingConventions]::Standard
+
+    $Method = $TypeBuilder.DefinePInvokeMethod(
+        "GetStdHandle",
+        "kernel32.dll",
+        $MethodAttributes,
+        $StandardCall,
+        [IntPtr],
+        [type[]]@([int]),
+        $CallingConvention,
+        $CharSet
+    )
+    $Method.SetImplementationFlags(
+        $Method.GetMethodImplementationFlags() -bor [System.Reflection.MethodImplAttributes]::PreserveSig
+    )
+
+    $UInt32Ref = [uint32].MakeByRefType()
+    $Method = $TypeBuilder.DefinePInvokeMethod(
+        "GetConsoleMode",
+        "kernel32.dll",
+        $MethodAttributes,
+        $StandardCall,
+        [bool],
+        [type[]]@([IntPtr], $UInt32Ref),
+        $CallingConvention,
+        $CharSet
+    )
+    $Method.SetImplementationFlags(
+        $Method.GetMethodImplementationFlags() -bor [System.Reflection.MethodImplAttributes]::PreserveSig
+    )
+
+    $Method = $TypeBuilder.DefinePInvokeMethod(
+        "SetConsoleMode",
+        "kernel32.dll",
+        $MethodAttributes,
+        $StandardCall,
+        [bool],
+        [type[]]@([IntPtr], [uint32]),
+        $CallingConvention,
+        $CharSet
+    )
+    $Method.SetImplementationFlags(
+        $Method.GetMethodImplementationFlags() -bor [System.Reflection.MethodImplAttributes]::PreserveSig
+    )
+
+    try {
+        return $TypeBuilder.CreateType()
+    } catch {
+        return $TypeBuilder.CreateTypeInfo().AsType()
     }
 }
-"@
-        }
 
-        [EasyTierInstallerConsoleMode]::Enable()
+function Enable-InstallerVirtualTerminal {
+    try {
+        $NativeMethods = Get-InstallerNativeMethodsType
+        $GetStdHandle = $NativeMethods.GetMethod("GetStdHandle")
+        $GetConsoleMode = $NativeMethods.GetMethod("GetConsoleMode")
+        $SetConsoleMode = $NativeMethods.GetMethod("SetConsoleMode")
+        $EnableVirtualTerminalProcessing = [uint32]4
+        $InvalidHandle = [IntPtr](-1)
+
+        foreach ($StdHandle in @(-11, -12)) {
+            $Handle = $GetStdHandle.Invoke($null, @($StdHandle))
+            if ($Handle -eq [IntPtr]::Zero -or $Handle -eq $InvalidHandle) {
+                continue
+            }
+
+            $Arguments = @($Handle, [uint32]0)
+            if (-not [bool]$GetConsoleMode.Invoke($null, $Arguments)) {
+                continue
+            }
+
+            $Mode = [uint32]$Arguments[1]
+            $NewMode = [uint32]($Mode -bor $EnableVirtualTerminalProcessing)
+            [void]$SetConsoleMode.Invoke($null, @($Handle, $NewMode))
+        }
     } catch {
         # Best-effort only. The installer still works without ANSI colors.
     }
