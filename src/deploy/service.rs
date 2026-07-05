@@ -286,6 +286,7 @@ async fn freebsd_service_installed() -> bool {
     })
 }
 
+#[cfg(any(windows, test))]
 fn parse_sc_state(text: &str) -> Option<String> {
     text.lines()
         .find(|line| line.contains("STATE"))
@@ -293,6 +294,7 @@ fn parse_sc_state(text: &str) -> Option<String> {
         .map(|state| state.trim().to_ascii_uppercase())
 }
 
+#[cfg(any(windows, test))]
 fn parse_sc_binary_path(text: &str) -> Option<String> {
     text.lines().find_map(|line| {
         let trimmed = line.trim_start();
@@ -306,7 +308,7 @@ fn parse_sc_binary_path(text: &str) -> Option<String> {
     })
 }
 
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 fn parse_launchctl_print(text: &str) -> ServiceStatusInfo {
     let lower = text.to_ascii_lowercase();
     let state = text.lines().find_map(|line| {
@@ -747,7 +749,7 @@ async fn run_status_legacy(install_dir: Option<PathBuf>) -> anyhow::Result<()> {
 }
 
 async fn run_status_legacy_with_install_dir(install_dir: &Path) -> anyhow::Result<()> {
-    let cli_path = find_easytier_cli(&install_dir)?;
+    let cli_path = find_easytier_cli(install_dir)?;
 
     let status = tokio::process::Command::new(&cli_path)
         .arg("service")
