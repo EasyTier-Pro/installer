@@ -4,6 +4,11 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+pub fn init_terminal() {
+    let colors_enabled = console::colors_enabled() || console::colors_enabled_stderr();
+    colored::control::set_override(colors_enabled);
+}
+
 fn debug_log_slot() -> &'static Mutex<Option<PathBuf>> {
     static SLOT: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
     SLOT.get_or_init(|| Mutex::new(None))

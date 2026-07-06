@@ -10,6 +10,8 @@ mod style;
 
 #[tokio::main]
 async fn main() {
+    style::init_terminal();
+
     let _ = ctrlc::set_handler(|| {
         let term = console::Term::stdout();
         let _ = term.show_cursor();

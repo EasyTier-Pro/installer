@@ -47,58 +47,6 @@ function Invoke-InstallerWebRequest {
     Invoke-WebRequest @Params
 }
 
-function Enable-InstallerVirtualTerminal {
-    try {
-        if (-not ("EasyTierInstallerConsoleMode" -as [type])) {
-            Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-
-public static class EasyTierInstallerConsoleMode
-{
-    private const int STD_OUTPUT_HANDLE = -11;
-    private const int STD_ERROR_HANDLE = -12;
-    private const uint ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr GetStdHandle(int nStdHandle);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
-
-    public static void Enable()
-    {
-        EnableOn(STD_OUTPUT_HANDLE);
-        EnableOn(STD_ERROR_HANDLE);
-    }
-
-    private static void EnableOn(int stdHandle)
-    {
-        IntPtr handle = GetStdHandle(stdHandle);
-        if (handle == IntPtr.Zero || handle == new IntPtr(-1)) {
-            return;
-        }
-
-        uint mode;
-        if (!GetConsoleMode(handle, out mode)) {
-            return;
-        }
-
-        SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-    }
-}
-"@
-        }
-
-        [EasyTierInstallerConsoleMode]::Enable()
-    } catch {
-        # Best-effort only. The installer still works without ANSI colors.
-    }
-}
-
 function Start-Installer {
     param(
         [Parameter(Mandatory = $true)]
@@ -106,7 +54,6 @@ function Start-Installer {
         [string[]]$InstallerArguments
     )
 
-    Enable-InstallerVirtualTerminal
     & $Path @InstallerArguments
 }
 
