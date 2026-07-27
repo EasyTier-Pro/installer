@@ -618,6 +618,33 @@ pub(crate) async fn run_deploy(
     Ok(())
 }
 
+pub(crate) async fn run_configure_service_recovery(
+    _install_dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        let install_dir = _install_dir.unwrap_or_else(default_install_dir);
+        if !service::query_service_status(&install_dir).await.installed {
+            anyhow::bail!("EasyTier service is not installed");
+        }
+
+        if !platform::is_elevated() {
+            let install_dir_arg = install_dir.to_string_lossy().to_string();
+            let status = platform::relaunch_elevated_with_replaced_args_hidden(&[
+                "configure-service-recovery",
+                "--install-dir",
+                &install_dir_arg,
+            ])?;
+            if status.success() {
+                return Ok(());
+            }
+            anyhow::bail!("提权后的服务故障自动恢复配置失败，请在管理员窗口中查看详细错误");
+        }
+    }
+
+    service::configure_service_recovery().await
+}
+
 pub(crate) async fn run_desktop_status(
     install_dir: Option<PathBuf>,
     config_server: Option<String>,
@@ -767,6 +794,7 @@ pub(crate) async fn run_desktop_install(
         && config_server_match
         && !machine_id.is_empty()
     {
+        run_configure_service_recovery(Some(install_dir.clone())).await?;
         emit(
             "service_installing",
             serde_json::json!({
@@ -939,6 +967,7 @@ pub(crate) async fn run_desktop_update(
     let core_path = install_dir.join(core_binary_name());
     let current_version = service::get_core_version(&core_path);
     if version_matches(current_version.as_deref(), &target_version) {
+        run_configure_service_recovery(Some(install_dir.clone())).await?;
         emit(
             "finished",
             serde_json::json!({
@@ -993,6 +1022,7 @@ pub(crate) async fn run_desktop_update(
     stop_service_for_update(&current_cli_path).await?;
     let update_result = async {
         let (_, cli_path) = install_prepared_desktop_update(&package, &install_dir)?;
+        service::configure_service_recovery().await?;
         start_service_strict(&cli_path).await?;
         Ok::<_, anyhow::Error>(())
     }
@@ -1043,6 +1073,7 @@ pub(crate) async fn run_desktop_update_service(
     let core_path = install_dir.join(core_binary_name());
     let current_version = service::get_core_version(&core_path);
     if version_matches(current_version.as_deref(), &target_version) {
+        service::configure_service_recovery().await?;
         return Ok(());
     }
 
@@ -1052,6 +1083,7 @@ pub(crate) async fn run_desktop_update_service(
     stop_service_for_update(&current_cli_path).await?;
     let update_result = async {
         let (_, cli_path) = install_prepared_desktop_update(&package, &install_dir)?;
+        service::configure_service_recovery().await?;
         start_service_strict(&cli_path).await
     }
     .await;
@@ -1343,6 +1375,7 @@ pub(crate) async fn run_upgrade(install_dir: &Path, target_version: &str) -> any
         service::get_core_version(&core_path).unwrap_or_else(|| "未知".to_string());
 
     if version_matches(Some(&current_version), &target_version) {
+        run_configure_service_recovery(Some(install_dir.to_path_buf())).await?;
         crate::style::info(&format!(
             "当前已是最新版本 {}",
             target_version.bright_white()
@@ -1405,6 +1438,8 @@ pub(crate) async fn run_upgrade(install_dir: &Path, target_version: &str) -> any
     let (_, cli_path, _) =
         download::download_easytier_with_fallback(&platform, install_dir, &target_version).await?;
     crate::style::success(&format!("已下载 {}", target_version));
+
+    service::configure_service_recovery().await?;
 
     println!();
     crate::style::info("正在启动服务...");

@@ -54,6 +54,9 @@ pub enum Command {
 
     #[command(name = "uninstall-service", hide = true)]
     UninstallService(UninstallServiceArgs),
+
+    #[command(name = "configure-service-recovery", hide = true)]
+    ConfigureServiceRecovery,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -175,6 +178,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::InstallService(args) => run_install_service(cli, args).await,
         Command::UpgradeService(args) => run_upgrade_service(cli, args).await,
         Command::UninstallService(args) => run_uninstall_service(cli, args).await,
+        Command::ConfigureServiceRecovery => {
+            deploy::run_configure_service_recovery(cli.install_dir).await
+        }
     }
 }
 
@@ -714,6 +720,25 @@ mod tests {
             Some(std::path::Path::new("/tmp/easytier-locks"))
         );
         assert!(args.desktop_parent_lock_held);
+    }
+
+    #[test]
+    fn parses_hidden_configure_service_recovery_with_global_install_dir() {
+        let cli = Cli::parse_from([
+            "easytier-pro-installer",
+            "configure-service-recovery",
+            "--install-dir",
+            "/tmp/easytier",
+        ]);
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::ConfigureServiceRecovery)
+        ));
+        assert_eq!(
+            cli.install_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/easytier"))
+        );
     }
 
     #[test]

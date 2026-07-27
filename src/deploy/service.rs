@@ -120,7 +120,10 @@ pub(crate) async fn query_service_status(install_dir: &Path) -> ServiceStatusInf
 
 #[cfg(windows)]
 async fn windows_service_status() -> ServiceStatusInfo {
-    let Ok(query) = tokio::process::Command::new("sc")
+    let Ok(sc_path) = windows_sc_path() else {
+        return ServiceStatusInfo::default();
+    };
+    let Ok(query) = tokio::process::Command::new(sc_path)
         .args(["query", SERVICE_NAME])
         .output()
         .await
@@ -152,7 +155,7 @@ async fn windows_service_status() -> ServiceStatusInfo {
 
 #[cfg(windows)]
 async fn windows_service_binary_path() -> Option<String> {
-    let output = tokio::process::Command::new("sc")
+    let output = tokio::process::Command::new(windows_sc_path().ok()?)
         .args(["qc", SERVICE_NAME])
         .output()
         .await
@@ -439,6 +442,112 @@ pub(crate) async fn systemd_daemon_reload() {
     }
 }
 
+pub(crate) async fn configure_service_recovery() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        configure_windows_service_recovery().await
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(())
+    }
+}
+
+#[cfg(any(windows, test))]
+const WINDOWS_FAILURE_RESET_SECONDS: &str = "60";
+#[cfg(any(windows, test))]
+const WINDOWS_FAILURE_ACTIONS: &str = "restart/1000/restart/3000/restart/5000";
+
+#[cfg(any(windows, test))]
+fn windows_failure_actions_args() -> [&'static str; 6] {
+    [
+        "failure",
+        SERVICE_NAME,
+        "reset=",
+        WINDOWS_FAILURE_RESET_SECONDS,
+        "actions=",
+        WINDOWS_FAILURE_ACTIONS,
+    ]
+}
+
+#[cfg(any(windows, test))]
+fn windows_failure_flag_args() -> [&'static str; 3] {
+    ["failureflag", SERVICE_NAME, "1"]
+}
+
+#[cfg(any(windows, test))]
+fn windows_query_failure_args() -> [&'static str; 2] {
+    ["qfailure", SERVICE_NAME]
+}
+
+#[cfg(any(windows, test))]
+fn windows_query_failure_flag_args() -> [&'static str; 2] {
+    ["qfailureflag", SERVICE_NAME]
+}
+
+#[cfg(windows)]
+async fn configure_windows_service_recovery() -> anyhow::Result<()> {
+    run_windows_sc_command(&windows_failure_actions_args()).await?;
+    run_windows_sc_command(&windows_failure_flag_args()).await?;
+
+    let failure_actions = run_windows_sc_command(&windows_query_failure_args()).await?;
+    let failure_flag = run_windows_sc_command(&windows_query_failure_flag_args()).await?;
+    crate::style::debug(&format!(
+        "Windows 服务故障恢复已配置: actions={}, flag={}",
+        String::from_utf8_lossy(&failure_actions.stdout).trim(),
+        String::from_utf8_lossy(&failure_flag.stdout).trim(),
+    ));
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_sc_path() -> anyhow::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buffer = vec![0_u16; 260];
+    let mut length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+    if length == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if length as usize >= buffer.len() {
+        buffer.resize(length as usize + 1, 0);
+        length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        if length == 0 || length as usize >= buffer.len() {
+            anyhow::bail!("无法确定 Windows 系统目录");
+        }
+    }
+
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize])).join("sc.exe"))
+}
+
+#[cfg(windows)]
+async fn run_windows_sc_command(args: &[&str]) -> anyhow::Result<std::process::Output> {
+    let output = tokio::process::Command::new(windows_sc_path()?)
+        .args(args)
+        .output()
+        .await
+        .map_err(|err| anyhow::anyhow!("执行 sc.exe {} 失败: {}", args[0], err))?;
+
+    if output.status.success() {
+        return Ok(output);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    anyhow::bail!(
+        "配置 Windows 服务故障恢复失败 (sc.exe {}): {}",
+        args[0],
+        detail
+    )
+}
+
 pub(crate) async fn install_service(
     cli_path: &Path,
     core_path: &Path,
@@ -504,6 +613,8 @@ async fn install_service_impl(
         }
         anyhow::bail!("安装服务失败");
     }
+
+    configure_service_recovery().await?;
 
     let start = tokio::process::Command::new(cli_path)
         .args(["service", "--name", SERVICE_NAME, "start"])
@@ -1153,6 +1264,30 @@ ExecStart={ path=/opt/easytier/easytier-core ; argv[]=/opt/easytier/easytier-cor
                 "*S-1-5-18:F",
                 "*S-1-5-32-544:F",
             ]
+        );
+    }
+
+    #[test]
+    fn windows_service_recovery_uses_restart_actions_for_all_failures() {
+        assert_eq!(
+            windows_failure_actions_args(),
+            [
+                "failure",
+                SERVICE_NAME,
+                "reset=",
+                "60",
+                "actions=",
+                "restart/1000/restart/3000/restart/5000",
+            ]
+        );
+        assert_eq!(
+            windows_failure_flag_args(),
+            ["failureflag", SERVICE_NAME, "1"]
+        );
+        assert_eq!(windows_query_failure_args(), ["qfailure", SERVICE_NAME]);
+        assert_eq!(
+            windows_query_failure_flag_args(),
+            ["qfailureflag", SERVICE_NAME]
         );
     }
 

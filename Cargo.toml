@@ -34,7 +34,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls-vendored", "stream"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_Registry"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_SystemInformation"] }
 
 [build-dependencies]
 thunk-rs = { version = "0.3.5", default-features = false, features = ["vc_ltl_only"] }
