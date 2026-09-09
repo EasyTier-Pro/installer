@@ -135,6 +135,15 @@ pub struct Network {
     pub regions: Vec<String>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct RegionAvailability {
+    pub code: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub available: bool,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CreateNetworkRequest {
     pub name: String,
@@ -324,6 +333,17 @@ impl ConsoleClient {
         .await
     }
 
+    pub async fn list_region_availability(
+        &self,
+        tenant_id: &str,
+    ) -> anyhow::Result<Vec<RegionAvailability>> {
+        self.request(
+            Method::GET,
+            &format!("/api/v1/tenants/{}/billing/regions", tenant_id),
+        )
+        .await
+    }
+
     pub async fn request_public<T: DeserializeOwned>(
         &self,
         method: Method,
@@ -393,6 +413,7 @@ impl ConsoleClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::TokenSet;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
@@ -432,5 +453,63 @@ mod tests {
         let request = rx.recv().expect("request");
         assert!(request.starts_with("GET /api/v1/releases/latest HTTP/1.1"));
         assert!(!request.contains("Authorization:"));
+    }
+
+    #[tokio::test]
+    async fn list_region_availability_uses_workspace_endpoint() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).expect("read request");
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let _ = tx.send(request);
+            let body = r#"[{"code":"cn-shanghai-1","display_name":"上海 1","available":true}]"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+
+        let token_path = std::env::temp_dir().join(format!(
+            "easytier-pro-installer-region-test-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let token_store = TokenStore::new(token_path.clone());
+        token_store
+            .save(&TokenSet {
+                access_token: "test-token".to_string(),
+                expires_in: 3600,
+                token_type: "Bearer".to_string(),
+                refresh_token: None,
+                id_token: None,
+                obtained_at: chrono::Utc::now(),
+            })
+            .expect("save token");
+        let client = ConsoleClient::new(format!("http://{}", addr), token_store);
+
+        let regions = client
+            .list_region_availability("workspace-1")
+            .await
+            .expect("regions");
+
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].code, "cn-shanghai-1");
+        assert!(regions[0].available);
+        let request = rx.recv().expect("request");
+        assert!(request.starts_with("GET /api/v1/tenants/workspace-1/billing/regions HTTP/1.1"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer test-token")
+        );
+        let _ = std::fs::remove_file(token_path);
     }
 }

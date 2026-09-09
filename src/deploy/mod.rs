@@ -10,7 +10,7 @@ pub(crate) use service::{StatusQueryMode, run_status, run_uninstall};
 
 use crate::api::client::{
     ConsoleClient, CreateNetworkRequest, CreateNodeRequest, DeviceSummary, LatestReleaseResponse,
-    NetworkSummary, TenantSummary,
+    NetworkSummary, RegionAvailability, TenantSummary,
 };
 use crate::config::Config;
 use colored::Colorize;
@@ -266,7 +266,6 @@ async fn onboard_device(
     client: &ConsoleClient,
     tenant: &TenantSummary,
     machine_id: &str,
-    recommended_region: &str,
 ) -> anyhow::Result<()> {
     println!();
     crate::style::info("正在等待设备注册到控制台...");
@@ -321,6 +320,11 @@ async fn onboard_device(
         }
     };
 
+    let available_regions = match client.list_region_availability(&tenant.id).await {
+        Ok(regions) => Ok(available_network_regions(regions)),
+        Err(e) => Err(e.to_string()),
+    };
+
     let joined_ids: std::collections::HashSet<String> =
         joined_networks.iter().map(|n| n.id.clone()).collect();
 
@@ -350,8 +354,30 @@ async fn onboard_device(
         }
     }
 
-    options.push("[创建新网络]".to_string());
-    actions.push(NetworkAction::Create);
+    if available_regions
+        .as_ref()
+        .is_ok_and(|regions| !regions.is_empty())
+    {
+        options.push("[创建新网络]".to_string());
+        actions.push(NetworkAction::Create);
+    }
+
+    if actions.is_empty() {
+        match &available_regions {
+            Ok(_) => crate::style::warning(
+                "当前工作区没有可加入的网络，也没有可用于创建网络的地域。请前往 Console 检查地域与套餐状态。",
+            ),
+            Err(e) => crate::style::warning(&format!(
+                "当前工作区没有可加入的网络，且暂时无法获取可用地域（{}）。请稍后重试，或前往 Console 创建网络。",
+                e
+            )),
+        }
+        return Ok(());
+    }
+
+    if let Err(e) = &available_regions {
+        crate::style::warning(&format!("获取可用地域失败，本次只能选择已有网络: {}", e));
+    }
 
     let choice = dialoguer::Select::with_theme(&crate::style::dialoguer_theme())
         .with_prompt("请选择操作")
@@ -390,21 +416,14 @@ async fn onboard_device(
             let name = dialoguer::Input::with_theme(&crate::style::dialoguer_theme())
                 .with_prompt("请输入新网络名称")
                 .interact()?;
-
-            let regions = if recommended_region.is_empty() {
-                if let Some(first_net) = all_networks.first() {
-                    first_net.regions.clone()
-                } else {
-                    crate::style::warning("平台未就绪，无法创建网络");
-                    return Ok(());
-                }
-            } else {
-                vec![recommended_region.to_string()]
-            };
+            let regions = available_regions
+                .as_ref()
+                .map_err(|_| anyhow::anyhow!("可用地域尚未加载"))?;
+            let region = select_network_region(regions)?;
 
             let req = CreateNetworkRequest {
                 name,
-                regions,
+                regions: vec![region],
                 ipv4_cidr: None,
                 relay_traffic_quota_bytes: None,
             };
@@ -613,7 +632,7 @@ pub(crate) async fn run_deploy(
         "EasyTier".bright_white()
     ));
 
-    onboard_device(client, tenant, &machine_id, "").await?;
+    onboard_device(client, tenant, &machine_id).await?;
 
     Ok(())
 }
@@ -1517,6 +1536,39 @@ fn print_device_name(device: &DeviceSummary, machine_id: &str) {
     }
 }
 
+fn select_network_region(regions: &[RegionAvailability]) -> anyhow::Result<String> {
+    if regions.is_empty() {
+        anyhow::bail!("当前工作区没有可用于创建网络的地域")
+    }
+    if regions.len() == 1 {
+        return Ok(regions[0].code.clone());
+    }
+
+    let labels = regions.iter().map(region_label).collect::<Vec<_>>();
+    let selected = dialoguer::Select::with_theme(&crate::style::dialoguer_theme())
+        .with_prompt("请选择网络地域")
+        .items(&labels)
+        .default(0)
+        .interact()?;
+    Ok(regions[selected].code.clone())
+}
+
+fn available_network_regions(regions: Vec<RegionAvailability>) -> Vec<RegionAvailability> {
+    regions
+        .into_iter()
+        .filter(|region| region.available && !region.code.trim().is_empty())
+        .collect()
+}
+
+fn region_label(region: &RegionAvailability) -> String {
+    match region.display_name.as_deref().map(str::trim) {
+        Some(display_name) if !display_name.is_empty() && display_name != region.code => {
+            format!("{} ({})", display_name, region.code)
+        }
+        _ => region.code.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1599,5 +1651,51 @@ mod tests {
             machine_id_from_service_args(Some(&"easytier-core --machine-id=machine-2".to_string())),
             Some("machine-2".to_string())
         );
+    }
+
+    #[test]
+    fn single_available_region_supports_first_network_creation() {
+        let regions = vec![RegionAvailability {
+            code: "cn-shanghai-1".to_string(),
+            display_name: Some("上海 1".to_string()),
+            available: true,
+        }];
+
+        assert_eq!(
+            select_network_region(&regions).expect("select only region"),
+            "cn-shanghai-1"
+        );
+        assert_eq!(region_label(&regions[0]), "上海 1 (cn-shanghai-1)");
+    }
+
+    #[test]
+    fn empty_available_region_list_rejects_network_creation() {
+        let err = select_network_region(&[]).unwrap_err();
+
+        assert!(err.to_string().contains("没有可用于创建网络的地域"));
+    }
+
+    #[test]
+    fn unavailable_or_unnamed_regions_are_not_creation_candidates() {
+        let regions = available_network_regions(vec![
+            RegionAvailability {
+                code: "cn-shanghai-1".to_string(),
+                display_name: None,
+                available: true,
+            },
+            RegionAvailability {
+                code: "bgp-locked".to_string(),
+                display_name: None,
+                available: false,
+            },
+            RegionAvailability {
+                code: " ".to_string(),
+                display_name: None,
+                available: true,
+            },
+        ]);
+
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].code, "cn-shanghai-1");
     }
 }
